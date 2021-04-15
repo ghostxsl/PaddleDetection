@@ -1577,3 +1577,120 @@ def smooth_l1(input, label, inside_weight=None, outside_weight=None,
     out = paddle.reshape(out, shape=[out.shape[0], -1])
     out = paddle.sum(out, axis=1)
     return out
+
+
+@paddle.jit.not_to_static
+def target_assign(input,
+                  matched_indices,
+                  negative_indices=None,
+                  mismatch_value=None,
+                  name=None):
+    """
+
+    This operator can be, for given the target bounding boxes or labels,
+    to assign classification and regression targets to each prediction as well as
+    weights to prediction. The weights is used to specify which prediction would
+    not contribute to training loss.
+
+    For each instance, the output `out` and`out_weight` are assigned based on
+    `match_indices` and `negative_indices`.
+    Assumed that the row offset for each instance in `input` is called lod,
+    this operator assigns classification/regression targets by performing the
+    following steps:
+
+    1. Assigning all outputs based on `match_indices`:
+
+    .. code-block:: text
+
+        If id = match_indices[i][j] > 0,
+
+            out[i][j][0 : K] = X[lod[i] + id][j % P][0 : K]
+            out_weight[i][j] = 1.
+
+        Otherwise,
+
+            out[j][j][0 : K] = {mismatch_value, mismatch_value, ...}
+            out_weight[i][j] = 0.
+
+    2. Assigning outputs based on `neg_indices` if `neg_indices` is provided:
+
+    Assumed that i-th instance in `neg_indices` is called `neg_indice`,
+    for i-th instance:
+
+    .. code-block:: text
+
+        for id in neg_indice:
+            out[i][id][0 : K] = {mismatch_value, mismatch_value, ...}
+            out_weight[i][id] = 1.0
+
+    Args:
+       input (Variable): This input is a 3D LoDTensor with shape [M, P, K]
+           or a Tensor with shape [B, F, K] or [B, F, A, K], where M = B * F.
+           Data type should be int32 or float32.
+       matched_indices (Variable): The input matched indices
+           is 2D Tenosr<int32> with shape [N, P], If MatchIndices[i][j] is -1,
+           the j-th entity of column is not matched to any entity of row in
+           i-th instance.
+       negative_indices (Variable, optional): The input negative example indices
+           are an optional input with shape [Neg, 1] and int32 type, where Neg is
+           the total number of negative example indices. When the input is Tensor,
+           its shape must be [B, M, 1], where Neg = B * M and it becomes negative
+           example mask.
+       mismatch_value (float32, optional): Fill this value to the mismatched
+           location.
+       name (string): The default value is None.  Normally there is no need for
+           user to set this property.  For more information, please refer
+           to :ref:`api_guide_Name`.
+
+    Returns:
+        tuple: A tuple(out, out_weight) is returned.
+
+        out (Variable): a 3D Tensor with shape [N, P, K] and same data type
+        with `input`, N and P is the same as they are in `matched_indices`,
+        K is the same as it in input of X.
+
+        out_weight (Variable): the weight for output with the shape of [N, P, 1].
+        Data type is float32.
+
+    Examples:
+
+        .. code-block:: python
+
+            import paddle.fluid as fluid
+            import paddle
+            paddle.enable_static()
+            x = fluid.data(
+                name='x',
+                shape=[4, 20, 4],
+                dtype='float',
+                lod_level=1)
+            matched_id = fluid.data(
+                name='indices',
+                shape=[8, 20],
+                dtype='int32')
+            trg, trg_weight = fluid.layers.target_assign(
+                x,
+                matched_id,
+                mismatch_value=0)
+    """
+
+    if in_dygraph_mode():
+        out, out_weight = core.ops.target_assign(
+            input, matched_indices, negative_indices, 'mismatch_value',
+            mismatch_value)
+        return out, out_weight
+    else:
+        helper = LayerHelper('target_assign', **locals())
+        out = helper.create_variable_for_type_inference(dtype=input.dtype)
+        out_weight = helper.create_variable_for_type_inference(dtype='float32')
+        helper.append_op(
+            type='target_assign',
+            inputs={
+                'X': input,
+                'MatchIndices': matched_indices,
+                'NegIndices': negative_indices
+            },
+            outputs={'Out': out,
+                     'OutWeight': out_weight},
+            attrs={'mismatch_value': mismatch_value})
+        return out, out_weight

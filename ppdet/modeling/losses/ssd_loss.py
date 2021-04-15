@@ -21,7 +21,7 @@ import paddle.nn as nn
 import paddle.nn.functional as F
 import numpy as np
 from ppdet.core.workspace import register
-from ..ops import bipartite_match, box_coder, iou_similarity
+from ..ops import bipartite_match, box_coder, iou_similarity, target_assign
 
 __all__ = ['SSDLoss']
 
@@ -122,7 +122,7 @@ class SSDLoss(nn.Layer):
             num_negs.append(num_neg)
         num_neg = paddle.stack(num_negs, axis=0).expand_as(idx_rank)
         neg_mask = (idx_rank < num_neg).astype(conf_loss.dtype)
-        return neg_mask
+        return neg_mask.astype('int32')
 
     def forward(self, boxes, scores, gt_box, gt_class, anchors):
         boxes = paddle.concat(boxes, axis=1)
@@ -138,22 +138,16 @@ class SSDLoss(nn.Layer):
         # 1. Find matched bounding box by prior box.
         #   1.1 Compute IOU similarity between ground-truth boxes and prior boxes.
         #   1.2 Compute matched bounding box by bipartite matching algorithm.
-        matched_indices = []
-        matched_dist = []
-        for i in range(gt_box.shape[0]):
-            iou = iou_similarity(gt_box[i], prior_boxes)
-            matched_indice, matched_d = bipartite_match(iou, self.match_type,
-                                                        self.overlap_threshold)
-            matched_indices.append(matched_indice)
-            matched_dist.append(matched_d)
-        matched_indices = paddle.concat(matched_indices, axis=0)
+        iou = iou_similarity(gt_box.reshape((-1, 4)), prior_boxes)
+        matched_indices, matched_dist = bipartite_match(
+            iou.reshape((batch_size, -1, num_priors)), self.match_type,
+            self.overlap_threshold)
         matched_indices.stop_gradient = True
-        matched_dist = paddle.concat(matched_dist, axis=0)
         matched_dist.stop_gradient = True
 
         # 2. Compute confidence for mining hard examples
         # 2.1. Get the target label based on matched indices
-        target_label, _ = self._label_target_assign(
+        target_label, _ = target_assign(
             gt_label, matched_indices, mismatch_value=num_classes)
         confidence = _reshape_to_2d(scores)
         # 2.2. Compute confidence loss.
@@ -176,23 +170,20 @@ class SSDLoss(nn.Layer):
             np.array(
                 [0.1, 0.1, 0.2, 0.2], dtype='float32')).reshape(
                     [1, 4]).expand_as(prior_boxes)
-        encoded_bbox = []
-        for i in range(gt_box.shape[0]):
-            encoded_bbox.append(
-                box_coder(
-                    prior_box=prior_boxes,
-                    prior_box_var=prior_box_var,
-                    target_box=gt_box[i],
-                    code_type='encode_center_size'))
-        encoded_bbox = paddle.stack(encoded_bbox, axis=0)
+        encoded_bbox = box_coder(
+            prior_box=prior_boxes,
+            prior_box_var=prior_box_var,
+            target_box=gt_box.reshape((-1, 4)),
+            code_type='encode_center_size')
+        encoded_bbox = encoded_bbox.reshape((batch_size, -1, num_priors, 4))
         # 4.2. Assign regression targets
-        target_bbox, target_loc_weight = self._bbox_target_assign(
-            encoded_bbox, matched_indices)
+        target_bbox, target_loc_weight = target_assign(
+            encoded_bbox, matched_indices, mismatch_value=0)
         # 4.3. Assign classification targets
-        target_label, target_conf_weight = self._label_target_assign(
+        target_label, target_conf_weight = target_assign(
             gt_label,
             matched_indices,
-            neg_mask=neg_mask,
+            negative_indices=neg_mask.unsqueeze(-1),
             mismatch_value=num_classes)
 
         # 5. Compute loss.
