@@ -1,0 +1,45 @@
+worker_num: 2
+TrainReader:
+  sample_transforms:
+  - Decode: {}
+  - RandomFlip: {prob: 0.5}
+  - RandomCrop: {scaling: [0.64, 1.0], thresholds: [.5, .7, .9], num_attempts: 3, cover_all_box: True}
+  - RandomResize: {target_size: [[480, 1333], [512, 1333], [544, 1333], [576, 1333], [608, 1333], [640, 1333], [672, 1333], [704, 1333], [736, 1333], [768, 1333], [800, 1333]]}
+  - NormalizeImage: {is_scale: true, mean: [0.485,0.456,0.406], std: [0.229, 0.224,0.225]}
+  - NormalizeBox: {}
+  - BboxXYXY2XYWH: {}
+  - Permute: {}
+  batch_transforms:
+  - PadBatch: {pad_to_stride: -1, return_pad_mask: true}
+  batch_size: 2
+  shuffle: true
+  drop_last: true
+  collate_batch: false
+  use_shared_memory: true
+
+
+EvalReader:
+  sample_transforms:
+  - Decode: {}
+  - Resize: {target_size: [800, 1333], keep_ratio: True}
+  - NormalizeImage: {is_scale: true, mean: [0.485,0.456,0.406], std: [0.229, 0.224,0.225]}
+  - Permute: {}
+  batch_transforms:
+  - PadBatch: {pad_to_stride: -1, return_pad_mask: true}
+  batch_size: 1
+  shuffle: false
+  drop_last: false
+  drop_empty: false
+
+
+TestReader:
+  sample_transforms:
+  - Decode: {}
+  - Resize: {target_size: [800, 1333], keep_ratio: True}
+  - NormalizeImage: {is_scale: true, mean: [0.485,0.456,0.406], std: [0.229, 0.224,0.225]}
+  - Permute: {}
+  batch_transforms:
+  - PadBatch: {pad_to_stride: -1, return_pad_mask: true}
+  batch_size: 1
+  shuffle: false
+  drop_last: false
