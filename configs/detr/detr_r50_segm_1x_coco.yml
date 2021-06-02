@@ -1,0 +1,26 @@
+_BASE_: [
+  '../datasets/coco_instance.yml',
+  '../runtime.yml',
+  '_base_/optimizer_1x.yml',
+  '_base_/detr_r50_segm.yml',
+  '_base_/detr_segm_reader.yml',
+]
+weights: output/detr_r50_segm_1x_coco/model_final
+
+
+TrainDataset:
+  !COCODataSet
+    image_dir: train2017
+    anno_path: annotations/instances_train2017.json
+    dataset_dir: dataset/coco
+    data_fields: ['image', 'gt_bbox', 'gt_class', 'gt_poly', 'is_crowd', 'pad_mask']
+
+EvalDataset:
+  !COCODataSet
+    image_dir: val2017
+    anno_path: annotations/instances_val2017.json
+    dataset_dir: dataset/coco
+
+TestDataset:
+  !ImageFolder
+    anno_path: annotations/instances_val2017.json
