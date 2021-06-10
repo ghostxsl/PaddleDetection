@@ -15,7 +15,9 @@
 from . import detr_transformer
 from . import utils
 from . import matchers
+from . import deformable_transformer
 
 from .detr_transformer import *
 from .utils import *
 from .matchers import *
+from .deformable_transformer import *

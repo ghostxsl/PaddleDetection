@@ -1,0 +1,39 @@
+_BASE_: [
+  '../datasets/coco_detection.yml',
+  '../runtime.yml',
+  '_base_/deformable_optimizer_1x.yml',
+  '_base_/deformable_detr_r50.yml',
+  '_base_/detr_reader.yml',
+]
+
+pretrain_weights: https://paddledet.bj.bcebos.com/models/pretrained/ResNet50_vd_pretrained.pdparams
+weights: output/deformable_detr_r50_1x_coco/model_final
+
+
+ResNet:
+  # index 0 stands for res2
+  depth: 50
+  variant: d
+  norm_type: bn
+  freeze_at: 0
+  return_idx: [1, 2, 3]
+  lr_mult_list: [0.0, 0.1, 0.1, 0.1]
+  num_stages: 4
+
+
+TrainDataset:
+  !COCODataSet
+    image_dir: train2017
+    anno_path: annotations/instances_train2017.json
+    dataset_dir: dataset/coco
+    data_fields: ['image', 'gt_bbox', 'gt_class', 'is_crowd', 'pad_mask']
+
+EvalDataset:
+  !COCODataSet
+    image_dir: val2017
+    anno_path: annotations/instances_val2017.json
+    dataset_dir: dataset/coco
+
+TestDataset:
+  !ImageFolder
+    anno_path: annotations/instances_val2017.json

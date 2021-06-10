@@ -113,11 +113,13 @@ class PositionEmbedding(nn.Layer):
                  normalize=True,
                  scale=None,
                  embed_type='sine',
-                 num_embeddings=50):
+                 num_embeddings=50,
+                 offset=0.):
         super(PositionEmbedding, self).__init__()
         assert embed_type in ['sine', 'learned']
 
         self.embed_type = embed_type
+        self.offset = offset
         if self.embed_type == 'sine':
             self.num_pos_feats = num_pos_feats
             self.temperature = temperature
@@ -147,8 +149,10 @@ class PositionEmbedding(nn.Layer):
             x_embed = mask.cumsum(2, dtype='float32')
             if self.normalize:
                 eps = 1e-6
-                y_embed = y_embed / (y_embed[:, -1:, :] + eps) * self.scale
-                x_embed = x_embed / (x_embed[:, :, -1:] + eps) * self.scale
+                y_embed = (y_embed + self.offset) / (
+                    y_embed[:, -1:, :] + eps) * self.scale
+                x_embed = (x_embed + self.offset) / (
+                    x_embed[:, :, -1:] + eps) * self.scale
 
             dim_t = 2 * (paddle.arange(self.num_pos_feats) //
                          2).astype('float32')
@@ -191,5 +195,9 @@ def sigmoid_focal_loss(logit, label, normalizer=1.0, alpha=0.25, gamma=2.0):
     if alpha >= 0:
         alpha_t = alpha * label + (1 - alpha) * (1 - label)
         loss = alpha_t * loss
-    return loss.mean(1).sum() / normalizer if normalizer > 1. else loss.mean(
-        1).sum()
+    return loss.mean(1).sum() / normalizer
+
+
+def inverse_sigmoid(x, eps=1e-6):
+    x = x.clip(min=0., max=1.)
+    return paddle.log(x / (1 - x + eps) + eps)
