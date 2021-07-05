@@ -456,9 +456,6 @@ class DETRTransformer(nn.Layer):
         self._reset_parameters()
 
     def _reset_parameters(self):
-        for p in self.parameters():
-            if p.dim() > 1:
-                xavier_uniform_(p)
         conv_init_(self.input_proj)
         normal_(self.query_pos_embed.weight)
 
