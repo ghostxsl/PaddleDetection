@@ -207,8 +207,6 @@ class DeformableTransformerEncoderLayer(nn.Layer):
     def _reset_parameters(self):
         linear_init_(self.linear1)
         linear_init_(self.linear2)
-        xavier_uniform_(self.linear1.weight)
-        xavier_uniform_(self.linear2.weight)
 
     def with_pos_embed(self, tensor, pos):
         return tensor if pos is None else tensor + pos
@@ -317,8 +315,6 @@ class DeformableTransformerDecoderLayer(nn.Layer):
     def _reset_parameters(self):
         linear_init_(self.linear1)
         linear_init_(self.linear2)
-        xavier_uniform_(self.linear1.weight)
-        xavier_uniform_(self.linear2.weight)
 
     def with_pos_embed(self, tensor, pos):
         return tensor if pos is None else tensor + pos
@@ -475,11 +471,9 @@ class DeformableTransformer(nn.Layer):
         normal_(self.level_embed.weight)
         normal_(self.tgt_embed.weight)
         normal_(self.query_pos_embed.weight)
-        xavier_uniform_(self.reference_points.weight)
-        constant_(self.reference_points.bias)
+        linear_init_(self.reference_points)
         for l in self.input_proj:
-            xavier_uniform_(l[0].weight)
-            constant_(l[0].bias)
+            conv_init_(l[0])
 
     @classmethod
     def from_config(cls, cfg, input_shape):
