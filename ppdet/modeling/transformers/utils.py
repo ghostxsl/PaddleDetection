@@ -64,11 +64,13 @@ def inverse_sigmoid(x, eps=1e-6):
 
 
 def deformable_attention_core_func(value, value_spatial_shapes,
-                                   sampling_locations, attention_weights):
+                                   value_level_start_index, sampling_locations,
+                                   attention_weights):
     """
     Args:
         value (Tensor): [bs, value_length, n_head, c]
         value_spatial_shapes (Tensor): [n_levels, 2]
+        value_level_start_index (Tensor): [n_levels]
         sampling_locations (Tensor): [bs, query_length, n_head, n_levels, n_points, 2]
         attention_weights (Tensor): [bs, query_length, n_head, n_levels, n_points]
 
