@@ -89,6 +89,17 @@ class BatchCompose(Compose):
         # use user-defined here
         if self.collate_batch:
             batch_data = default_collate_fn(data)
+        elif self.collate_batch is None:
+            batch_data = {}
+            for k in data[0].keys():
+                # if k == 'curr_iter':
+                #     continue
+                tmp_data = [_d[k] for _d in data]
+
+                if 'image' in k:
+                    tmp_data = np.stack(tmp_data, axis=0)
+
+                batch_data[k] = tmp_data
         else:
             batch_data = {}
             for k in data[0].keys():
