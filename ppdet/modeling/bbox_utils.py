@@ -601,3 +601,84 @@ def bbox_iou_np_expand(box1, box2, x1y1x2y2=True, eps=1e-16):
 
     ious = inter_area / (b1_area + b2_area - inter_area + eps)
     return ious
+
+
+def rotate_matrix_yaw(rotation_yaw):
+    r"""
+        Calculate the rotation matrix according to the rotation angle.
+
+        Args:
+            rotation_yaw (Tensor): [..., 1]
+        Return:
+            matrix (Tensor): [..., 3, 3]
+    """
+    ones = paddle.ones_like(rotation_yaw)
+    zeros = paddle.zeros_like(rotation_yaw)
+    row_1 = paddle.concat(
+        [rotation_yaw.cos(), zeros, rotation_yaw.sin()], axis=-1)
+    row_2 = paddle.concat([zeros, ones, zeros], axis=-1)
+    row_3 = paddle.concat(
+        [-rotation_yaw.sin(), zeros, rotation_yaw.cos()], axis=-1)
+    R = paddle.stack([row_1, row_2, row_3], axis=-2)
+    return R
+
+
+def points3d_corners(center_3d, size, rotation_yaw, origin=(0.5, 0.5, 0.5)):
+    r"""
+        Calculate 8 corners according to the center_3d, size, rotation_yaw.
+
+        Args:
+            center_3d (Tensor): [..., 3] (x, y, z)(l h w)in camera
+            size (Tensor): [..., 3] (l h w)
+            rotation_yaw (Tensor): [..., 1]
+        Return:
+            corners_3d (Tensor): [..., 3, 8]
+    """
+    R = rotate_matrix_yaw(rotation_yaw)
+    l, h, w = size.chunk(3, axis=-1)
+    zeros = paddle.zeros_like(l)
+
+    _x = paddle.concat(
+        [l, l, zeros, zeros, l, l, zeros, zeros], axis=-1) - l * origin[0]
+    _y = paddle.concat(
+        [h, h, h, h, zeros, zeros, zeros, zeros], axis=-1) - h * origin[1]
+    _z = paddle.concat(
+        [w, zeros, zeros, w, w, zeros, zeros, w], axis=-1) - w * origin[2]
+
+    corners_3d = paddle.stack([_x, _y, _z], axis=-2)
+    corners_3d = paddle.matmul(R, corners_3d) + center_3d.unsqueeze(-1)  # 3 x 8
+    return corners_3d
+
+
+def compute_bbox3d_corners(center_2d,
+                           depth,
+                           size,
+                           rotation_yaw,
+                           K_inv,
+                           origin=(0.5, 0.5, 0.5)):
+    r"""
+        Calculate 8 corners according to the center_2d, size, rotation_yaw.
+
+        Args:
+            center_2d (Tensor): [..., 2] (x, y)
+            depth (Tensor): [..., 1]
+            size (Tensor): [..., 3] (l h w)
+            rotation_yaw (Tensor): [..., 1]
+            K_inv (Tensor): [..., 4, 4]
+        Return:
+            corners_3d (Tensor): [..., 3, 8]
+    """
+    center_shape = center_2d.shape
+    center_shape[-1] = 1
+    ones = paddle.ones(center_shape)
+
+    center_3d = paddle.concat([center_2d, ones], axis=-1)
+    center_3d *= depth
+    center_3d = paddle.concat([center_3d, ones], axis=-1).unsqueeze(-1)
+
+    center_3d = paddle.matmul(K_inv, center_3d).squeeze(-1)
+    center_3d, _ = paddle.split(center_3d, [3, 1], axis=-1)
+
+    corners_3d = points3d_corners(center_3d, size, rotation_yaw, origin)
+
+    return corners_3d

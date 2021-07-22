@@ -1,0 +1,9 @@
+_BASE_: [
+  '../datasets/monokitti3d.yml',
+  '../runtime.yml',
+  '_base_/optimizer_1x.yml',
+  '_base_/fcos_mono3d_r101_fpn.yml',
+  '_base_/fcos_mono3d_reader.yml',
+]
+
+weights: output/fcos_mono3d_r101_fpn_1x_coco/model_final

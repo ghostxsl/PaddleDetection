@@ -1,0 +1,50 @@
+architecture: FCOSMono3D
+pretrain_weights: https://paddledet.bj.bcebos.com/models/pretrained/ResNet101_pretrained.pdparams
+
+FCOSMono3D:
+  backbone: ResNet
+  neck: FPN
+  fcos_mono3d_head: FCOSMono3DHead
+  fcos_mono3d_post_process: FCOSMono3DPostProcess
+
+ResNet:
+  # index 0 stands for res2
+  depth: 101
+  norm_type: bn
+  freeze_at: 0
+  return_idx: [1,2,3]
+  num_stages: 4
+
+FPN:
+  out_channel: 256
+  spatial_scales: [0.125, 0.0625, 0.03125]
+  extra_stage: 2
+  has_extra_convs: true
+  use_c5: false
+
+FCOSMono3DHead:
+  feat_branch:
+    name: FCOSFeat
+    feat_in: 256
+    feat_out: 256
+    num_convs: 4
+    norm_type: "gn"
+    use_dcn: false
+  fcos_mono3d_loss: FCOSMono3DLoss
+  object_sizes_boundary: [48, 96, 192, 384]
+  center_sampling_radius: 1.5
+  norm_reg_targets: true
+  centerness_on_reg: true
+
+FCOSMono3DLoss:
+  reg_weights: {offset: 1.0, depth: 0.2, size: 1.0, rotation: 1.0}
+
+FCOSMono3DPostProcess:
+  nms:
+    name: MultiClassNMS
+    nms_top_k: 1000
+    keep_top_k: 100
+    score_threshold: 0.05
+    nms_threshold: 0.8
+    normalized: False
+    return_index: True
