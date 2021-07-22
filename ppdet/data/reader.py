@@ -98,6 +98,8 @@ class BatchCompose(Compose):
 
                 if 'image' in k:
                     tmp_data = np.stack(tmp_data, axis=0)
+                elif 'im_id' in k:
+                    tmp_data = np.stack(tmp_data, axis=0)
 
                 batch_data[k] = tmp_data
         else:

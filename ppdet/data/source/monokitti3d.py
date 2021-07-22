@@ -82,6 +82,7 @@ class MonoKitti3d(DetDataset):
 
             if 'image' in self.data_fields:
                 info['im_file'] = get_image_path(data_root, idx)
+                info['img_name'] = idx
 
             if 'label' in self.data_fields:
                 label_path = get_label_path(data_root, idx)
@@ -120,7 +121,10 @@ class MonoKitti3d(DetDataset):
         with futures.ThreadPoolExecutor(self.num_worker) as executor:
             image_infos = executor.map(_parse_func, image_ids)
 
-        self.roidbs = list(image_infos)
+        image_infos = list(image_infos)
+        for i, info in enumerate(image_infos):
+            info['im_id'] = np.array([i])
+        self.roidbs = image_infos
 
     @staticmethod
     def filter_kitti_anno(label,
@@ -205,7 +209,8 @@ class MonoKitti3d(DetDataset):
             _corners_3d = np.vstack([_x, _y, _z])
             _corners_3d = R @_corners_3d + np.array(loc).reshape(3, 1)  # 3 x 8
 
-            _corners_2d = K[:3, :3] @_corners_3d
+            _corners_2d = K @np.concatenate(
+                [_corners_3d, np.ones_like(_x[None, :])])
             _corners_2d = _corners_2d[[0, 1], :] / _corners_2d[[2], :]  # 2 x 8
 
             corners_3d.append(_corners_3d.T)

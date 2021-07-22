@@ -17,7 +17,7 @@ import paddle
 import paddle.nn as nn
 import paddle.nn.functional as F
 from ppdet.core.workspace import register
-from ppdet.modeling.bbox_utils import nonempty_bbox, rbox2poly
+from ppdet.modeling.bbox_utils import nonempty_bbox, rbox2poly, compute_bbox3d_corners_centers, point3d_to_image
 from ppdet.modeling.layers import TTFBox
 from .transformers import bbox_cxcywh_to_xyxy
 try:
@@ -649,3 +649,80 @@ class SparsePostProcess(object):
 
         bbox_pred = paddle.concat(boxes_final)
         return bbox_pred, bbox_num
+
+
+@register
+class FCOSMono3DPostProcess(object):
+    __inject__ = ['nms']
+
+    def __init__(self, nms=None):
+        super(FCOSMono3DPostProcess, self).__init__()
+        self.nms = nms
+
+    def _decode_fcos_mono3d(self, cls_logits, bboxes_reg, centerness,
+                            direction_logits, anchor_points, scale_factor,
+                            camera_instrinsic):
+        cls_probs = F.sigmoid(cls_logits)
+        centerness = F.sigmoid(centerness)
+        score = cls_probs * centerness
+        score = score.transpose([0, 2, 1])
+
+        # center_2d
+        scale_factor = paddle.stack(scale_factor).flip([1]).reshape(
+            [-1, 1, 2]).astype(paddle.float32)
+        anchor_points_flatten = paddle.concat(
+            [a.reshape([-1, 2]) for a in anchor_points])
+        bboxes_reg[:, :, :2] += anchor_points_flatten
+        bboxes_reg[:, :, :2] /= scale_factor
+        # rotation
+        direction_max_ind = direction_logits.argmax(
+            axis=-1).astype(paddle.float32)
+        bboxes_reg[:, :, 6] = (1 - direction_max_ind) * (bboxes_reg[:, :, 6] - np.pi) \
+                              + direction_max_ind * bboxes_reg[:, :, 6]
+
+        center, depth, size, rotation_yaw = bboxes_reg.split(
+            [2, 1, 3, 1], axis=-1)
+
+        camera_instrinsic = paddle.stack(camera_instrinsic).astype(
+            paddle.float32)
+        camera_instrinsic[:, 0, :] /= scale_factor[:, :, 0]
+        camera_instrinsic[:, 1, :] /= scale_factor[:, :, 1]
+        K_inv = np.linalg.pinv(camera_instrinsic.numpy())
+        K_inv = paddle.to_tensor(K_inv).unsqueeze(1)
+        camera_instrinsic = camera_instrinsic.unsqueeze(1)
+
+        corners_3d, center_3d = compute_bbox3d_corners_centers(
+            center, depth, size, rotation_yaw, K_inv)
+        # bbox_2d
+        corners_2d = point3d_to_image(corners_3d, camera_instrinsic)
+        corners_2d = corners_2d.transpose([0, 1, 3, 2])
+        bbox_2d_xminymin = corners_2d.min(axis=-2)
+        bbox_2d_xmaxymax = corners_2d.max(axis=-2)
+        bbox_2d = paddle.concat([bbox_2d_xminymin, bbox_2d_xmaxymax], axis=-1)
+        # bird view bbox
+        bboxes = corners_3d.transpose([0, 1, 3, 2])[:, :, :4, :]
+        bboxes = paddle.stack([bboxes[:, :, :, 0], bboxes[:, :, :, 2]], axis=-1)
+        bboxes = bboxes.reshape([bboxes_reg.shape[0], bboxes_reg.shape[1], -1])
+
+        out_bboxes = paddle.concat(
+            [bbox_2d, size, center_3d, rotation_yaw], axis=-1)
+
+        return bboxes, score, out_bboxes
+
+    def __call__(self, fcos_head_outs, scale_factor, camera_instrinsic):
+        cls_logits, bboxes_reg, centerness, direction_logits, anchor_points = fcos_head_outs
+
+        bboxes_bird_view, score, bboxes_reg_pred = self._decode_fcos_mono3d(
+            cls_logits, bboxes_reg, centerness, direction_logits, anchor_points,
+            scale_factor, camera_instrinsic)
+
+        bbox_pred, bbox_num, bbox_index = self.nms(bboxes_bird_view, score)
+
+        if bbox_num.sum() > 0:
+            bboxes_reg_pred = bboxes_reg_pred.flatten(stop_axis=1)
+            out_bboxes = paddle.gather(bboxes_reg_pred, bbox_index)
+            out_bboxes = paddle.concat([bbox_pred[:, :2], out_bboxes], axis=-1)
+        else:
+            out_bboxes = paddle.to_tensor([])
+
+        return out_bboxes, bbox_num

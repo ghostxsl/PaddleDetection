@@ -34,7 +34,7 @@ from ppdet.core.workspace import create
 from ppdet.utils.checkpoint import load_weight, load_pretrain_weight
 from ppdet.utils.visualizer import visualize_results, save_result
 from ppdet.metrics import Metric, COCOMetric, VOCMetric, WiderFaceMetric, get_infer_results, KeyPointTopDownCOCOEval, KeyPointTopDownMPIIEval
-from ppdet.metrics import RBoxMetric, JDEDetMetric
+from ppdet.metrics import RBoxMetric, JDEDetMetric, MonoKitti3dMetric
 from ppdet.data.source.category import get_categories
 import ppdet.utils.stats as stats
 
@@ -243,6 +243,8 @@ class Trainer(object):
             ]
         elif self.cfg.metric == 'MOTDet':
             self._metrics = [JDEDetMetric(), ]
+        elif self.cfg.metric == 'MonoKitti3d':
+            self._metrics = [MonoKitti3dMetric(self.cfg.filename)]
         else:
             logger.warning("Metric not support for metric type {}".format(
                 self.cfg.metric))
@@ -558,14 +560,12 @@ class Trainer(object):
                     shape=[None, 3, 192, 64], name='crops')
             })
 
-
-        static_model = paddle.jit.to_static(
-                self.model, input_spec=input_spec)
+        static_model = paddle.jit.to_static(self.model, input_spec=input_spec)
         # NOTE: dy2st do not pruned program, but jit.save will prune program
         # input spec, prune input spec here and save with pruned input spec
         pruned_input_spec = self._prune_input_spec(
-                input_spec, static_model.forward.main_program,
-                static_model.forward.outputs)
+            input_spec, static_model.forward.main_program,
+            static_model.forward.outputs)
 
         # dy2st and save model
         if 'slim' not in self.cfg or self.cfg['slim_type'] != 'QAT':

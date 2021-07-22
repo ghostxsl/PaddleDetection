@@ -21,6 +21,7 @@ import sys
 import json
 import paddle
 import numpy as np
+import copy
 
 from .map_utils import prune_zero_padding, DetectionMAP
 from .coco_utils import get_infer_results, cocoapi_eval
@@ -31,12 +32,8 @@ from ppdet.utils.logger import setup_logger
 logger = setup_logger(__name__)
 
 __all__ = [
-    'Metric',
-    'COCOMetric',
-    'VOCMetric',
-    'WiderFaceMetric',
-    'get_infer_results',
-    'RBoxMetric',
+    'Metric', 'COCOMetric', 'VOCMetric', 'WiderFaceMetric', 'get_infer_results',
+    'RBoxMetric', 'MonoKitti3dMetric'
 ]
 
 COCO_SIGMAS = np.array([
@@ -395,3 +392,87 @@ class RBoxMetric(Metric):
 
     def get_results(self):
         return {'bbox': [self.detection_map.get_map()]}
+
+
+class MonoKitti3dMetric(Metric):
+    def __init__(self,
+                 filename,
+                 clsid2name={0: 'Pedestrian',
+                             1: 'Cyclist',
+                             2: 'Car'}):
+        super(MonoKitti3dMetric, self).__init__()
+        self.output_dir = os.path.join('output_results', filename)
+        self.clsid2name = clsid2name
+        self.all_field_default = dict([
+            ('name', None),
+            ('truncated', -1),
+            ('occluded', -1),
+            ('alpha', -10),
+            ('bbox', None),
+            ('dimensions', [-1, -1, -1]),
+            ('location', [-1000, -1000, -1000]),
+            ('rotation_y', -10),
+            ('score', 0.0),
+        ])
+        self.result_bbox = {}
+
+    def reset(self):
+        self.result_bbox = {}
+
+    def update(self, inputs, outputs):
+        bbox_preds, bbox_nums = outputs['bbox'].numpy(), outputs[
+            'bbox_num'].numpy().tolist()
+        img_names = inputs['img_name']
+        if sum(bbox_nums) > 0:
+            index = np.cumsum(bbox_nums).tolist()
+            start_ind = 0
+            for name, end_ind in zip(img_names, index):
+                if end_ind == start_ind:
+                    self.result_bbox[name] = []
+                    continue
+                pred_single = bbox_preds[start_ind:end_ind]
+                outs = []
+                for pred in pred_single:
+                    obj_field = copy.deepcopy(self.all_field_default)
+                    obj_field['name'] = self.clsid2name[int(pred[0])]
+                    obj_field['score'] = pred[1]
+                    obj_field['bbox'] = pred[2:6].tolist()
+                    obj_field['dimensions'] = pred[6:9].tolist()
+                    obj_field['location'] = pred[9:12].tolist()
+                    obj_field['rotation_y'] = pred[12]
+                    outs.append(obj_field)
+                self.result_bbox[name] = outs
+                start_ind = end_ind
+        else:
+            for name in img_names:
+                self.result_bbox[name] = []
+
+    def accumulate(self):
+        if len(self.result_bbox) > 0:
+            for name, objs in self.result_bbox.items():
+                out_txt = os.path.join(self.output_dir, name + '.txt')
+                if os.path.exists(out_txt):
+                    os.remove(out_txt)
+                f = open(out_txt, 'a')
+                for obj in objs:
+                    obj_str = [
+                        obj['name'], str(obj['truncated']),
+                        str(obj['occluded']), str(obj['alpha'])
+                    ]
+                    for a in obj['bbox']:
+                        obj_str.append(str(a))
+                    for a in obj['dimensions']:
+                        obj_str.append(str(a))
+                    for a in obj['location']:
+                        obj_str.append(str(a))
+                    obj_str.append(str(obj['rotation_y']))
+                    obj_str.append(str(obj['score']))
+                    f.write(' '.join(obj_str) + '\n')
+                f.close()
+            print(f'Evaluation results save in {self.output_dir}')
+
+    def log(self):
+        print('Evaluation results saved!')
+
+    def get_results(self):
+        return self.result_bbox
