@@ -32,17 +32,15 @@ __all__ = ['MonoKitti3d']
 @register
 @serializable
 class MonoKitti3d(DetDataset):
-
-    CLASSES = ('Pedestrian', 'Cyclist', 'Car')
-
     def __init__(self,
                  dataset_dir,
                  image_dir,
                  anno_path,
                  data_fields=['image'],
-                 sample_num=1,
+                 sample_num=-1,
                  use_default_label=None,
                  num_worker=8,
+                 category_name=('Pedestrian', 'Cyclist', 'Car'),
                  **kwargs):
         super().__init__(
             dataset_dir=dataset_dir,
@@ -55,23 +53,18 @@ class MonoKitti3d(DetDataset):
 
         [setattr(self, k, v) for k, v in locals().items()]
 
-        self.class_label_map = {c: i for i, c in enumerate(self.CLASSES)}
-        print(self.class_label_map)
-
-        # self.parse_dataset()
-
-    #     def __getitem__(self, idx):
-    #         # data batch
-    #         roidb = copy.deepcopy(self.roidbs[idx])
-
-    #         return roidb
+        self.name2catid = {
+            cname: i
+            for i, cname in enumerate(self.category_name)
+        }
+        self.clsid2catid = {
+            i: cid
+            for i, cid in enumerate(self.name2catid.values())
+        }
 
     def parse_dataset(self):
-        '''parse_dataset
-        '''
         anno_path = os.path.join(self.dataset_dir, self.anno_path)
         data_root = os.path.join(self.dataset_dir, self.image_dir)
-        print(data_root, anno_path)
 
         image_ids = [
             lin.strip() for lin in open(anno_path, 'r').readlines() if lin
@@ -85,9 +78,9 @@ class MonoKitti3d(DetDataset):
 
             if 'label' in self.data_fields:
                 label_path = get_label_path(data_root, idx)
-                label = get_label_anno(label_path)
+                label = get_label_anno(label_path, self.name2catid)
                 label = self.filter_kitti_anno(
-                    label, used_classes=self.CLASSES, volume_thresh=0.001)
+                    label, used_classes=self.category_name, volume_thresh=0.001)
                 info['label'] = label
 
             if 'calib' in self.data_fields:
@@ -104,10 +97,6 @@ class MonoKitti3d(DetDataset):
                 info['label'].update(
                     self.compute_corners(info['label'], info['calib']))
 
-            if 'label' in self.data_fields:
-                info['label']['type'] = np.array(
-                    [self.class_label_map[n] for n in info['label']['type']])
-
             _info = {}
             for k in info:
                 if isinstance(info[k], dict):
@@ -121,6 +110,8 @@ class MonoKitti3d(DetDataset):
             image_infos = executor.map(_parse_func, image_ids)
 
         self.roidbs = list(image_infos)
+        if self.sample_num > -1:
+            self.roidbs = self.roidbs[:self.sample_num]
 
     @staticmethod
     def filter_kitti_anno(label,
@@ -180,7 +171,11 @@ class MonoKitti3d(DetDataset):
         _depth = _center[:, 2]
         _center = _center[:, [0, 1]] / _center[:, [2]]
 
-        return {'center_3d': _center3d, 'center_2d': _center, 'depth': _depth}
+        return {
+            'center_3d': _center3d.astype('float32'),
+            'center_2d': _center.astype('float32'),
+            'depth': _depth.astype('float32')
+        }
 
     @staticmethod
     def compute_corners(label, calib, bbox2d=True):
@@ -217,7 +212,10 @@ class MonoKitti3d(DetDataset):
         assert corners_2d.shape == (dims.shape[0], 8, 2), 'corners_2d'
         assert corners_3d.shape == (dims.shape[0], 8, 3), 'corners_3d'
 
-        result = {'corners_2d': corners_2d, 'corners_3d': corners_3d}
+        result = {
+            'corners_2d': corners_2d.astype('float32'),
+            'corners_3d': corners_3d.astype('float32')
+        }
 
         if bbox2d is True:
             xmin = corners_2d[:, :, 0].min(axis=-1).reshape(-1, 1)
@@ -228,13 +226,13 @@ class MonoKitti3d(DetDataset):
 
             assert bbox_2d.shape == (dims.shape[0], 4), 'bbox_2d'
 
-            result.update({'bbox_2d': bbox_2d})
+            result.update({'bbox_2d': bbox_2d.astype('float32')})
 
         return result
 
 
 def rotate_matrix(ry):
-    '''yam _rotate_matrix
+    '''yaw _rotate_matrix
     '''
     R = np.array([[math.cos(ry), 0, math.sin(ry)], [0, 1, 0],
                   [-math.sin(ry), 0, math.cos(ry)]])
@@ -268,7 +266,7 @@ def get_velodyne_path(prefix, idx):
     return _get_info_path(idx, os.path.join(prefix, 'velodyne'), '.bin')
 
 
-def get_label_anno(label_path):
+def get_label_anno(label_path, name2catid):
     with open(label_path, 'r') as f:
         lines = f.readlines()
 
@@ -288,24 +286,32 @@ def get_label_anno(label_path):
     num_gt = len(content)
     num_objects = len([x[0] for x in content if x[0] != 'DontCare'])
 
-    annos['type'] = np.array([x[0] for x in content])
-    annos['truncated'] = np.array([float(x[1]) for x in content])
-    annos['occluded'] = np.array([int(x[2]) for x in content])
-    annos['alpha'] = np.array([float(x[3]) for x in content])
+    annos['type'] = np.array(
+        [name2catid[x[0]] for x in content], dtype=np.float32).reshape(-1, 1)
+    annos['truncated'] = np.array(
+        [float(x[1]) for x in content], dtype=np.float32).reshape(-1, 1)
+    annos['occluded'] = np.array([int(x[2]) for x in content]).reshape(-1, 1)
+    annos['alpha'] = np.array(
+        [float(x[3]) for x in content], dtype=np.float32).reshape(-1, 1)
     annos['bbox'] = np.array(
-        [[float(info) for info in x[4:8]] for x in content]).reshape(-1, 4)
+        [[float(info) for info in x[4:8]] for x in content],
+        dtype=np.float32).reshape(-1, 4)
     # dimensions will convert hwl format to standard lhw(camera) format.
     annos['dimensions'] = np.array(
-        [[float(info) for info in x[8:11]] for x in content]).reshape(
-            -1, 3)[:, [2, 0, 1]]
+        [[float(info) for info in x[8:11]] for x in content],
+        dtype=np.float32).reshape(-1, 3)[:, [2, 0, 1]]
     annos['location'] = np.array(
-        [[float(info) for info in x[11:14]] for x in content]).reshape(-1, 3)
-    annos['rotation_y'] = np.array([float(x[14]) for x in content]).reshape(-1)
+        [[float(info) for info in x[11:14]] for x in content],
+        dtype=np.float32).reshape(-1, 3)
+    annos['rotation_y'] = np.array(
+        [float(x[14]) for x in content], dtype=np.float32).reshape(-1, 1)
 
     if len(content) != 0 and len(content[0]) == 16:  # have score
-        annos['score'] = np.array([float(x[15]) for x in content])
+        annos['score'] = np.array(
+            [float(x[15]) for x in content], dtype=np.float32).reshape(-1, 1)
     else:
-        annos['score'] = np.zeros((annos['bbox'].shape[0], ))
+        annos['score'] = np.zeros(
+            (annos['bbox'].shape[0], ), dtype=np.float32).reshape(-1, 1)
 
     # index = list(range(num_objects)) + [-1] * (num_gt - num_objects)
     # annos['index'] = np.array(index, dtype=np.int32)
@@ -331,7 +337,9 @@ def get_calib_info(calib_path, use_homo_coord=True):
 
         for lin in lines:
             items = [item.strip() for item in lin.strip().split(':')]
-            values = np.array([float(x) for x in items[1].strip().split(' ')])
+            values = np.array(
+                [float(x) for x in items[1].strip().split(' ')],
+                dtype=np.float32)
 
             matrix = values.reshape(
                 3, 3) if items[0] == 'R0_rect' else values.reshape(3, 4)
