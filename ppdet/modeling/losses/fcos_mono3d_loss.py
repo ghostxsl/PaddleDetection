@@ -21,32 +21,16 @@ import paddle.nn as nn
 import paddle.nn.functional as F
 
 from ppdet.core.workspace import register
-from ppdet.modeling import ops
-from ppdet.modeling.losses.fcos_loss import flatten_tensor
 
 __all__ = ['FCOSMono3DLoss']
-
-
-def concat_flatten_tensors(tensor_list):
-    out_tensors = []
-
-    for tensors in zip(*tensor_list):
-        if len(out_tensors) == 0:
-            out_tensors = [[] for _ in tensors]
-        for i, tensor in enumerate(tensors):
-            out_tensors[i].append(flatten_tensor(tensor, True))
-
-    for i, tensors in enumerate(out_tensors):
-        out_tensors[i] = paddle.concat(tensors)
-
-    return out_tensors
 
 
 @register
 class FCOSMono3DLoss(nn.Layer):
     """
-    FCOSLoss
+    FCOSMono3DLoss
     Args:
+        num_classes (int):
         loss_alpha (float): alpha in focal loss
         loss_gamma (float): gamma in focal loss
         reg_weights (dict): weight for location loss
@@ -122,16 +106,18 @@ class FCOSMono3DLoss(nn.Layer):
             print(f'num pos: {mask_positive.sum().item()}')
             return loss_dict
         # cls
-        cls_prob = paddle.nn.functional.sigmoid(cls_logits)
-        cls_prob_max = cls_prob.max(axis=-1)
-        cls_prob_max_ind = cls_prob.argmax(axis=-1)
+        cls_prob = F.sigmoid(cls_logits)
+        centerness = F.sigmoid(centerness)
+        score = cls_prob * centerness
+        cls_prob_max = score.max(axis=-1)
+        cls_prob_max_ind = score.argmax(axis=-1)
         pred_cls = self._get_pred_gt_mask_select_tensor(
             cls_prob_max_ind.unsqueeze(-1), mask_positive)
         target_cls = self._get_pred_gt_mask_select_tensor(
             target_class.unsqueeze(-1), mask_positive)
         num_correct = (pred_cls == target_cls).astype(paddle.float32).sum()
         loss_dict['log_recall'] = num_correct / target_cls.shape[0]
-        num_pred = (cls_prob_max >= 0.5).astype(paddle.float32).sum()
+        num_pred = (cls_prob_max >= 0.05).astype(paddle.float32).sum()
         loss_dict['log_precision'] = num_correct / (num_pred + 1e-9)
         # reg
         pred_reg = self._get_pred_gt_mask_select_tensor(
@@ -161,7 +147,7 @@ class FCOSMono3DLoss(nn.Layer):
         bg_index = cls_logits.shape[-1]
         mask_positive = (
             target_class != bg_index).astype(paddle.float32).unsqueeze(-1)
-        num_positive = mask_positive.sum().clip(min=1)
+        num_positive = mask_positive.sum()
 
         # 1. cls_logits: sigmoid_focal_loss
         # expand onehot labels
@@ -172,12 +158,13 @@ class FCOSMono3DLoss(nn.Layer):
             cls_logits,
             target_class_one_hot,
             alpha=self.loss_alpha,
-            gamma=self.loss_gamma) / num_positive
+            gamma=self.loss_gamma) / num_positive.clip(min=1)
 
-        if mask_positive.sum() > 0:
+        if num_positive > 0:
             # 2. bboxes_reg: smooth_l1_loss
-            reg_loss = self._get_loss_regression(bboxes_reg, target_regression,
-                                                 mask_positive) / num_positive
+            reg_loss = self._get_loss_regression(
+                bboxes_reg, target_regression,
+                mask_positive) / num_positive.clip(min=1)
 
             # 3. centerness: binary_cross_entropy_with_logits
             pred_ctn = self._get_pred_gt_mask_select_tensor(centerness,
@@ -185,7 +172,8 @@ class FCOSMono3DLoss(nn.Layer):
             target_ctn = self._get_pred_gt_mask_select_tensor(target_centerness,
                                                               mask_positive)
             ctn_loss = F.binary_cross_entropy_with_logits(
-                pred_ctn, target_ctn, reduction='sum') / num_positive
+                pred_ctn, target_ctn,
+                reduction='sum') / num_positive.clip(min=1)
 
             # 4. direction_logits: cross_entropy
             pred_dir = self._get_pred_gt_mask_select_tensor(
@@ -193,7 +181,8 @@ class FCOSMono3DLoss(nn.Layer):
             target_dir = self._get_pred_gt_mask_select_tensor(
                 target_direction.unsqueeze(-1), mask_positive)
             dir_loss = F.cross_entropy(
-                pred_dir, target_dir, reduction='sum') / num_positive
+                pred_dir, target_dir,
+                reduction='sum') / num_positive.clip(min=1)
         else:
             reg_loss = paddle.to_tensor([0.])
             ctn_loss = paddle.to_tensor([0.])

@@ -12,7 +12,7 @@ ResNet:
   depth: 101
   norm_type: bn
   freeze_at: 0
-  return_idx: [1,2,3]
+  return_idx: [1, 2, 3]
   num_stages: 4
 
 FPN:
@@ -45,6 +45,6 @@ FCOSMono3DPostProcess:
     nms_top_k: 1000
     keep_top_k: 100
     score_threshold: 0.05
-    nms_threshold: 0.8
+    nms_threshold: 0.5
     normalized: False
     return_index: True

@@ -677,6 +677,9 @@ class FCOSMono3DPostProcess(object):
         # rotation
         direction_max_ind = direction_logits.argmax(
             axis=-1).astype(paddle.float32)
+        # Limit the rotation_y into [0, pi].
+        bboxes_reg[:, :, 6] = bboxes_reg[:, :, 6] - paddle.floor(
+            bboxes_reg[:, :, 6] / np.pi) * np.pi
         bboxes_reg[:, :, 6] = (1 - direction_max_ind) * (bboxes_reg[:, :, 6] - np.pi) \
                               + direction_max_ind * bboxes_reg[:, :, 6]
 

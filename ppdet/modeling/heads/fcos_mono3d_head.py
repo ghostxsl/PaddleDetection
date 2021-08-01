@@ -191,19 +191,19 @@ class FCOSMono3DHead(nn.Layer):
     def _check_inside_bbox(self, reg_lrtb, gt_2d_bbox, anchor_points_x,
                            anchor_points_y, fpn_strides_tensor):
         if self.center_sampling_radius > 0:
+            len_fpn_feats = fpn_strides_tensor.shape[0]
             fpn_strides_tensor *= self.center_sampling_radius
             gt_bbox_cx = (gt_2d_bbox[:, 0] + gt_2d_bbox[:, 2]) / 2
             gt_bbox_cy = (gt_2d_bbox[:, 1] + gt_2d_bbox[:, 3]) / 2
             gt_bbox_cxcy = paddle.stack(
                 [gt_bbox_cx, gt_bbox_cy], axis=-1).flatten()
             clip_bbox_xminymin = (gt_bbox_cxcy - fpn_strides_tensor).reshape(
-                [fpn_strides_tensor.shape[0], -1, 2])
+                [len_fpn_feats, -1, 2])
             clip_bbox_xmaxymax = (gt_bbox_cxcy + fpn_strides_tensor).reshape(
-                [fpn_strides_tensor.shape[0], -1, 2])
+                [len_fpn_feats, -1, 2])
             clip_bbox = paddle.concat(
                 [clip_bbox_xminymin, clip_bbox_xmaxymax], axis=-1)
-            gt_bbox = gt_2d_bbox.unsqueeze(0).tile(
-                [fpn_strides_tensor.shape[0], 1, 1])
+            gt_bbox = gt_2d_bbox.unsqueeze(0).tile([len_fpn_feats, 1, 1])
             clip_bbox[:, :, :2] = paddle.where(
                 gt_bbox[:, :, :2] > clip_bbox[:, :, :2], gt_bbox[:, :, :2],
                 clip_bbox[:, :, :2])
@@ -223,8 +223,8 @@ class FCOSMono3DHead(nn.Layer):
         bbox_scale = paddle.concat(bbox_scale)
         lower_bound = bbox_scale[:, 0:1].tile([1, reg_max.shape[1]])
         upper_bound = bbox_scale[:, 1:].tile([1, reg_max.shape[1]])
-        is_match_scale = (reg_max > lower_bound).astype(paddle.float32) * \
-                         (reg_max < upper_bound).astype(paddle.float32)
+        is_match_scale = (reg_max >= lower_bound).astype(paddle.float32) * \
+                         (reg_max <= upper_bound).astype(paddle.float32)
         return is_match_scale
 
     def _gt_to_target_assignment(self, anchor_points, gt_labels, gt_2d_bboxes,
@@ -242,9 +242,8 @@ class FCOSMono3DHead(nn.Layer):
         num_points_list = [a.shape[0] * a.shape[1] for a in anchor_points]
         fpn_strides_tensor = []
         for num_points, fpn_stride in zip(num_points_list, self.fpn_strides):
-            fpn_stride = paddle.to_tensor([fpn_stride]).unsqueeze(0).tile(
-                [num_points, 1])
-            fpn_strides_tensor.append(fpn_stride)
+            fpn_strides_tensor.append(
+                paddle.to_tensor([[fpn_stride]]).tile([num_points, 1]))
         fpn_strides_tensor = paddle.concat(fpn_strides_tensor)
 
         for gt_label, gt_2d_bbox, gt_2d_center, gt_depth, gt_size, gt_rotation in zip(
@@ -290,13 +289,13 @@ class FCOSMono3DHead(nn.Layer):
             gt_direction = (gt_rotation >= 0).astype(paddle.float32)
             gt_rotation = (1 - gt_direction) * (gt_rotation + math.pi
                                                 ) + gt_direction * gt_rotation
-            targets_rotation = paddle.gather(
+            target_rotation = paddle.gather(
                 gt_rotation, min_dist_ind, axis=0).unsqueeze(1)
             targets_regression.append(
                 paddle.concat(
                     [
                         target_offset, target_depth, target_size,
-                        targets_rotation
+                        target_rotation
                     ],
                     axis=-1))
             # make centerness target
@@ -304,15 +303,14 @@ class FCOSMono3DHead(nn.Layer):
                 -self.centerness_alpha *
                 target_offset_.square().sum(axis=-1, keepdim=True).sqrt() /
                 (1.414 * fpn_strides_tensor))
-            target_centerness[target_class == self.bg_index] = 0
             targets_centerness.append(target_centerness)
             # make direction target
             target_direction = paddle.gather(
                 gt_direction.astype(paddle.int64), min_dist_ind, axis=0)
             targets_direction.append(target_direction)
         targets_class = paddle.stack(targets_class)
-        targets_centerness = paddle.stack(targets_centerness)
         targets_regression = paddle.stack(targets_regression)
+        targets_centerness = paddle.stack(targets_centerness)
         targets_direction = paddle.stack(targets_direction)
 
         return targets_class, targets_regression, targets_centerness, targets_direction
@@ -328,7 +326,6 @@ class FCOSMono3DHead(nn.Layer):
                                                    self.fpn_strides, fpn_feats):
             fcos_cls_feat, fcos_reg_feat = self.feat_branch(fpn_feat)
             cls_logit = self.cls_head(fcos_cls_feat)
-            cls_logit = cls_logit.flatten(start_axis=2).transpose([0, 2, 1])
 
             if self.centerness_on_reg:
                 centerness = self.centerness_head(fcos_reg_feat)
@@ -346,15 +343,15 @@ class FCOSMono3DHead(nn.Layer):
                             bbox_reg[-1] = bbox_reg[-1] * fpn_stride
                 else:
                     bbox_reg.append(reg_head(fcos_reg_feat))
+            bbox_reg = paddle.concat(bbox_reg, axis=1)
 
             direction_cls_logit = self.direction_cls_head(fcos_reg_feat)
             direction_cls_logits.append(
                 direction_cls_logit.flatten(start_axis=2).transpose([0, 2, 1]))
-            cls_logits.append(cls_logit)
+            cls_logits.append(
+                cls_logit.flatten(start_axis=2).transpose([0, 2, 1]))
             bboxes_reg.append(
-                paddle.concat(
-                    bbox_reg, axis=1).flatten(start_axis=2).transpose(
-                        [0, 2, 1]))
+                bbox_reg.flatten(start_axis=2).transpose([0, 2, 1]))
             centerness_list.append(
                 centerness.flatten(start_axis=2).transpose([0, 2, 1]))
 

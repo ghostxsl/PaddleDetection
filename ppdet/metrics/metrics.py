@@ -402,6 +402,8 @@ class MonoKitti3dMetric(Metric):
                              2: 'Car'}):
         super(MonoKitti3dMetric, self).__init__()
         self.output_dir = os.path.join('output_results', filename)
+        if not os.path.exists(self.output_dir):
+            os.makedirs(self.output_dir)
         self.clsid2name = clsid2name
         self.all_field_default = dict([
             ('name', None),
@@ -436,8 +438,11 @@ class MonoKitti3dMetric(Metric):
                     obj_field = copy.deepcopy(self.all_field_default)
                     obj_field['name'] = self.clsid2name[int(pred[0])]
                     obj_field['score'] = pred[1]
+                    obj_field['alpha'] = pred[12] - np.arctan2(pred[9],
+                                                               pred[11])
                     obj_field['bbox'] = pred[2:6].tolist()
-                    obj_field['dimensions'] = pred[6:9].tolist()
+                    # lhw -> hwl
+                    obj_field['dimensions'] = pred[6:9][[1, 2, 0]].tolist()
                     obj_field['location'] = pred[9:12].tolist()
                     obj_field['rotation_y'] = pred[12]
                     outs.append(obj_field)
