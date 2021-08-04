@@ -221,6 +221,7 @@ if [ ${MODE} = "infer" ]; then
 
 else
     IFS="|"
+    train_model_name=(${train_model_name[*]})
     export Count=0
     USE_GPU_KEY=(${train_use_gpu_value})
     for gpu in ${gpu_list[*]}; do
@@ -251,9 +252,11 @@ else
                     run_train=${pact_trainer}
                     run_export=${pact_export}
                     flag_quant=True
+                    set_train_model_name=${train_model_name[2]}
                 elif [ ${trainer} = "${fpgm_key}" ]; then
                     run_train=${fpgm_trainer}
                     run_export=${fpgm_export}
+                    set_train_model_name=${train_model_name[1]}
                 elif [ ${trainer} = "${distill_key}" ]; then
                     run_train=${distill_trainer}
                     run_export=${distill_export}
@@ -266,6 +269,7 @@ else
                 else
                     run_train=${norm_trainer}
                     run_export=${norm_export}
+                    set_train_model_name=${train_model_name[0]}
                 fi
 
                 if [ ${run_train} = "null" ]; then
@@ -299,7 +303,7 @@ else
                 eval $cmd
                 status_check $? "${cmd}" "${status_log}"
 
-                set_eval_pretrain=$(func_set_params "${pretrain_model_key}" "${save_log}/${train_model_name}")
+                set_eval_pretrain=$(func_set_params "${pretrain_model_key}" "${save_log}/${set_train_model_name}")
                 # save norm trained models to set pretrain for pact training and fpgm training
                 if [ ${trainer} = ${trainer_norm} ]; then
                     load_norm_train_model=${set_eval_pretrain}
@@ -315,7 +319,7 @@ else
                 if [ ${run_export} != "null" ]; then
                     # run export model
                     save_infer_path="${save_log}"
-                    export_cmd="${python} ${run_export} ${export_weight}=${save_log}/${train_model_name} ${save_infer_key}=${save_infer_path}"
+                    export_cmd="${python} ${run_export} ${export_weight}=${save_log}/${set_train_model_name} ${save_infer_key}=${save_infer_path}"
                     echo $export_cmd
                     sleep 2
                     eval $export_cmd
