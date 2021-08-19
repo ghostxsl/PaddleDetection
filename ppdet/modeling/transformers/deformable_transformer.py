@@ -25,7 +25,7 @@ from paddle import ParamAttr
 from ppdet.core.workspace import register
 from ..layers import MultiHeadAttention
 from .position_encoding import PositionEmbedding
-from .utils import _get_clones, deformable_attention_core_func
+from .utils import _get_clones
 from ..initializer import linear_init_, constant_, xavier_uniform_, normal_
 
 __all__ = ['DeformableTransformer']
@@ -60,6 +60,13 @@ class MSDeformableAttention(nn.Layer):
         self.attention_weights = nn.Linear(embed_dim, self.total_points)
         self.value_proj = nn.Linear(embed_dim, embed_dim)
         self.output_proj = nn.Linear(embed_dim, embed_dim)
+        try:
+            # use cuda op
+            from deformable_detr_ops import ms_deformable_attn
+        except:
+            # use paddle func
+            from .utils import deformable_attention_core_func as ms_deformable_attn
+        self.ms_deformable_attn_core = ms_deformable_attn
 
         self._reset_parameters()
 
@@ -92,6 +99,7 @@ class MSDeformableAttention(nn.Layer):
                 reference_points,
                 value,
                 value_spatial_shapes,
+                value_level_start_index,
                 value_mask=None):
         """
         Args:
@@ -99,7 +107,8 @@ class MSDeformableAttention(nn.Layer):
             reference_points (Tensor): [bs, query_length, n_levels, 2], range in [0, 1], top-left (0,0),
                 bottom-right (1, 1), including padding area
             value (Tensor): [bs, value_length, C]
-            value_spatial_shapes (Tensor): [n_levels, 2], [(H_0, W_0), (H_1, W_1), ..., (H_{L-1}, W_{L-1})]
+            value_spatial_shapes (Tensor(int64)): [n_levels, 2], [(H_0, W_0), (H_1, W_1), ...]
+            value_level_start_index (Tensor(int64)): [n_levels], [0, H_0*W_0, H_0*W_0+H_1*W_1, ...]
             value_mask (Tensor): [bs, value_length], True for non-padding elements, False for padding elements
 
         Returns:
@@ -128,8 +137,9 @@ class MSDeformableAttention(nn.Layer):
             bs, Len_q, 1, self.num_levels, 1, 2
         ]) + sampling_offsets / offset_normalizer
 
-        output = deformable_attention_core_func(
-            value, value_spatial_shapes, sampling_locations, attention_weights)
+        output = self.ms_deformable_attn_core(
+            value, value_spatial_shapes, value_level_start_index,
+            sampling_locations, attention_weights)
         output = self.output_proj(output)
 
         return output
@@ -182,12 +192,13 @@ class DeformableTransformerEncoderLayer(nn.Layer):
                 src,
                 reference_points,
                 spatial_shapes,
+                level_start_index,
                 src_mask=None,
                 pos_embed=None):
         # self attention
         src2 = self.self_attn(
             self.with_pos_embed(src, pos_embed), reference_points, src,
-            spatial_shapes, src_mask)
+            spatial_shapes, level_start_index, src_mask)
         src = src + self.dropout1(src2)
         src = self.norm1(src)
         # ffn
@@ -222,6 +233,7 @@ class DeformableTransformerEncoder(nn.Layer):
     def forward(self,
                 src,
                 spatial_shapes,
+                level_start_index,
                 src_mask=None,
                 pos_embed=None,
                 valid_ratios=None):
@@ -232,8 +244,8 @@ class DeformableTransformerEncoder(nn.Layer):
         reference_points = self.get_reference_points(spatial_shapes,
                                                      valid_ratios)
         for layer in self.layers:
-            output = layer(output, reference_points, spatial_shapes, src_mask,
-                           pos_embed)
+            output = layer(output, reference_points, spatial_shapes,
+                           level_start_index, src_mask, pos_embed)
 
         return output
 
@@ -293,6 +305,7 @@ class DeformableTransformerDecoderLayer(nn.Layer):
                 reference_points,
                 memory,
                 memory_spatial_shapes,
+                memory_level_start_index,
                 memory_mask=None,
                 query_pos_embed=None):
         # self attention
@@ -304,7 +317,7 @@ class DeformableTransformerDecoderLayer(nn.Layer):
         # cross attention
         tgt2 = self.cross_attn(
             self.with_pos_embed(tgt, query_pos_embed), reference_points, memory,
-            memory_spatial_shapes, memory_mask)
+            memory_spatial_shapes, memory_level_start_index, memory_mask)
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
 
@@ -326,13 +339,15 @@ class DeformableTransformerDecoder(nn.Layer):
                 reference_points,
                 memory,
                 memory_spatial_shapes,
+                memory_level_start_index,
                 memory_mask=None,
                 query_pos_embed=None):
         output = tgt
         intermediate = []
         for lid, layer in enumerate(self.layers):
             output = layer(output, reference_points, memory,
-                           memory_spatial_shapes, memory_mask, query_pos_embed)
+                           memory_spatial_shapes, memory_level_start_index,
+                           memory_mask, query_pos_embed)
 
             if self.return_intermediate:
                 intermediate.append(output)
@@ -491,13 +506,16 @@ class DeformableTransformer(nn.Layer):
         mask_flatten = paddle.concat(mask_flatten, 1)
         lvl_pos_embed_flatten = paddle.concat(lvl_pos_embed_flatten, 1)
         # [l, 2]
-        spatial_shapes = paddle.to_tensor(spatial_shapes, dtype='int64')
+        spatial_shapes = paddle.to_tensor(spatial_shapes, dtype=paddle.int64)
+        # [l], 每一个level的起始index
+        level_start_index = paddle.concat((paddle.to_tensor(
+            [0], dtype=paddle.int64), spatial_shapes.prod(1).cumsum(0)[:-1]))
         # [b, l, 2]
         valid_ratios = paddle.stack(valid_ratios, 1)
 
         # encoder
-        memory = self.encoder(src_flatten, spatial_shapes, mask_flatten,
-                              lvl_pos_embed_flatten, valid_ratios)
+        memory = self.encoder(src_flatten, spatial_shapes, level_start_index,
+                              mask_flatten, lvl_pos_embed_flatten, valid_ratios)
 
         # prepare input for decoder
         bs, _, c = memory.shape
@@ -509,6 +527,6 @@ class DeformableTransformer(nn.Layer):
 
         # decoder
         hs = self.decoder(tgt, reference_points_input, memory, spatial_shapes,
-                          mask_flatten, query_embed)
+                          level_start_index, mask_flatten, query_embed)
 
         return (hs, memory, reference_points)
