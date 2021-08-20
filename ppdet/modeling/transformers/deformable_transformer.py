@@ -31,6 +31,10 @@ from ..initializer import linear_init_, constant_, xavier_uniform_, normal_
 __all__ = ['DeformableTransformer']
 
 
+def print_hook_fn(grad):
+    print(grad)
+
+
 class MSDeformableAttention(nn.Layer):
     def __init__(self,
                  embed_dim=256,
@@ -100,7 +104,8 @@ class MSDeformableAttention(nn.Layer):
                 value,
                 value_spatial_shapes,
                 value_level_start_index,
-                value_mask=None):
+                value_mask=None,
+                ind=None):
         """
         Args:
             query (Tensor): [bs, query_length, C]
@@ -243,7 +248,7 @@ class DeformableTransformerEncoder(nn.Layer):
                 [src.shape[0], spatial_shapes.shape[0], 2])
         reference_points = self.get_reference_points(spatial_shapes,
                                                      valid_ratios)
-        for layer in self.layers:
+        for i, layer in enumerate(self.layers):
             output = layer(output, reference_points, spatial_shapes,
                            level_start_index, src_mask, pos_embed)
 
@@ -307,7 +312,8 @@ class DeformableTransformerDecoderLayer(nn.Layer):
                 memory_spatial_shapes,
                 memory_level_start_index,
                 memory_mask=None,
-                query_pos_embed=None):
+                query_pos_embed=None,
+                ind=None):
         # self attention
         q = k = self.with_pos_embed(tgt, query_pos_embed)
         tgt2 = self.self_attn(q, k, value=tgt)
@@ -316,8 +322,13 @@ class DeformableTransformerDecoderLayer(nn.Layer):
 
         # cross attention
         tgt2 = self.cross_attn(
-            self.with_pos_embed(tgt, query_pos_embed), reference_points, memory,
-            memory_spatial_shapes, memory_level_start_index, memory_mask)
+            self.with_pos_embed(tgt, query_pos_embed),
+            reference_points,
+            memory,
+            memory_spatial_shapes,
+            memory_level_start_index,
+            memory_mask,
+            ind=ind)
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
 
@@ -345,10 +356,15 @@ class DeformableTransformerDecoder(nn.Layer):
         output = tgt
         intermediate = []
         for lid, layer in enumerate(self.layers):
-            output = layer(output, reference_points, memory,
-                           memory_spatial_shapes, memory_level_start_index,
-                           memory_mask, query_pos_embed)
-
+            output = layer(
+                output,
+                reference_points,
+                memory,
+                memory_spatial_shapes,
+                memory_level_start_index,
+                memory_mask,
+                query_pos_embed,
+                ind=lid)
             if self.return_intermediate:
                 intermediate.append(output)
 
