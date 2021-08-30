@@ -106,3 +106,55 @@ def deformable_attention_core_func(value, value_spatial_shapes,
               attention_weights).sum(-1).reshape([bs, n_head * c, Len_q])
 
     return output.transpose([0, 2, 1])
+
+
+def get_padding_value(value, value_spatial_shapes, sampling_locations):
+    bs, Len_v, n_head, c = value.shape
+    out_value = []
+    out_sampling_locations = []
+    value_list = value.split(value_spatial_shapes.prod(1).tolist(), axis=1)
+    H, W = value_spatial_shapes.max(axis=0).tolist()
+    for level, (h, w) in enumerate(value_spatial_shapes.tolist()):
+        # N_, H_*W_, M_, D_ -> N_, H_*W_, M_*D_ -> N_, M_*D_, H_*W_ -> N_*M_, D_, H_, W_
+        value_l_ = value_list[level].flatten(2).transpose(
+            [0, 2, 1]).reshape([bs * n_head, c, h, w])
+        out_value.append(F.pad(value_l_, [0, W - w, 0, H - h]))
+        # N_, Lq_, M_, P_, 2 -> N_, M_, Lq_, P_, 2 -> N_*M_, Lq_, P_, 2
+        sampling_grid_l_ = sampling_locations[:, :, :, level].transpose(
+            [0, 2, 1, 3, 4]).flatten(0, 1)
+        out_sampling_locations.append(sampling_grid_l_ * h / H)
+    return paddle.concat(out_value), paddle.concat(out_sampling_locations)
+
+
+def deformable_attention_core_func_v2(value, value_spatial_shapes,
+                                      value_level_start_index,
+                                      sampling_locations, attention_weights):
+    """
+    Args:
+        value (Tensor): [bs, value_length, n_head, c]
+        value_spatial_shapes (Tensor): [n_levels, 2]
+        value_level_start_index (Tensor): [n_levels]
+        sampling_locations (Tensor): [bs, query_length, n_head, n_levels, n_points, 2]
+        attention_weights (Tensor): [bs, query_length, n_head, n_levels, n_points]
+
+    Returns:
+        output (Tensor): [bs, Length_{query}, C]
+    """
+    bs, Len_v, _, c = value.shape
+    _, Len_q, n_head, n_levels, n_points, _ = sampling_locations.shape
+
+    value_pad, sampling_locations_scale = get_padding_value(
+        value, value_spatial_shapes, sampling_locations)
+    sampling_grids = 2 * sampling_locations_scale - 1
+    sampling_value = F.grid_sample(
+        value_pad, sampling_grids, align_corners=False)
+    sampling_value = sampling_value.reshape(
+        [bs * n_head, n_levels, c, Len_q, n_points])
+    sampling_value = sampling_value.transpose([0, 2, 3, 1, 4]).flatten(-2)
+    # (N_, Lq_, M_, L_, P_) -> (N_, M_, Lq_, L_, P_) -> (N_*M_, 1, Lq_, L_*P_)
+    attention_weights = attention_weights.transpose([0, 2, 1, 3, 4]).reshape(
+        [bs * n_head, 1, Len_q, n_levels * n_points])
+    output = (sampling_value * attention_weights).sum(-1).reshape(
+        [bs, n_head * c, Len_q])
+
+    return output.transpose([0, 2, 1])

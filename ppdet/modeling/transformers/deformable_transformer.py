@@ -65,7 +65,7 @@ class MSDeformableAttention(nn.Layer):
             from deformable_detr_ops import ms_deformable_attn
         except:
             # use paddle func
-            from .utils import deformable_attention_core_func as ms_deformable_attn
+            from .utils import deformable_attention_core_func_v2 as ms_deformable_attn
         self.ms_deformable_attn_core = ms_deformable_attn
 
         self._reset_parameters()
