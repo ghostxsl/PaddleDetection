@@ -1,0 +1,51 @@
+architecture: GFL
+pretrain_weights: https://paddledet.bj.bcebos.com/models/pretrained/ResNet50_vd_ssld_pretrained.pdparams
+
+GFL:
+  backbone: ResNet
+  neck: PPYOLOPAN
+  head: GFLHead
+
+ResNet:
+  depth: 50
+  variant: d
+  norm_type: bn
+  freeze_at: 0
+  return_idx: [1, 2, 3]
+  num_stages: 4
+
+PPYOLOPAN:
+  drop_block: true
+  block_size: 3
+  keep_prob: 0.9
+  spp: true
+
+GFLHead:
+  conv_feat:
+    name: FCOSFeat
+    feat_in: 256
+    feat_out: 256
+    num_convs: 4
+    norm_type: "gn"
+    use_dcn: false
+  fpn_stride: [8, 16, 32]
+  prior_prob: 0.01
+  reg_max: 16
+  loss_qfl:
+    name: QualityFocalLoss
+    use_sigmoid: True
+    beta: 2.0
+    loss_weight: 1.0
+  loss_dfl:
+    name: DistributionFocalLoss
+    loss_weight: 0.25
+  loss_bbox:
+    name: GIoULoss
+    loss_weight: 2.0
+  nms:
+    name: MultiClassNMS
+    nms_top_k: 1000
+    keep_top_k: 100
+    score_threshold: 0.025
+    nms_threshold: 0.6
+  use_yolopan: True

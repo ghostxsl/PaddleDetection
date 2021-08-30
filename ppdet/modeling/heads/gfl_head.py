@@ -174,7 +174,9 @@ class GFLHead(nn.Layer):
                  feat_in_chan=256,
                  nms=None,
                  nms_pre=1000,
-                 cell_offset=0):
+                 cell_offset=0,
+                 use_yolopan=False,
+                 yolopan_feats_in=[256, 512, 1024]):
         super(GFLHead, self).__init__()
         self.conv_feat = conv_feat
         self.dgqp_module = dgqp_module
@@ -190,6 +192,8 @@ class GFLHead(nn.Layer):
         self.nms_pre = nms_pre
         self.cell_offset = cell_offset
         self.use_sigmoid = self.loss_qfl.use_sigmoid
+        self.use_yolopan = use_yolopan
+        self.yolopan_feats_in = yolopan_feats_in
         if self.use_sigmoid:
             self.cls_out_channels = self.num_classes
         else:
@@ -232,10 +236,20 @@ class GFLHead(nn.Layer):
 
         self.distribution_project = Integral(self.reg_max)
 
+        if self.use_yolopan:
+            self.conv_yolopan = nn.LayerList()
+            for in_channel in self.yolopan_feats_in:
+                self.conv_yolopan.append(
+                    nn.Conv2D(in_channel, self.feat_in_chan, 1))
+
     def forward(self, fpn_feats):
         assert len(fpn_feats) == len(
             self.fpn_stride
         ), "The size of fpn_feats is not equal to size of fpn_stride"
+        if self.use_yolopan:
+            fpn_feats = fpn_feats[::-1]
+            for i, feat in enumerate(fpn_feats):
+                fpn_feats[i] = self.conv_yolopan[i](feat)
         cls_logits_list = []
         bboxes_reg_list = []
         for scale_reg, fpn_feat in zip(self.scales_regs, fpn_feats):

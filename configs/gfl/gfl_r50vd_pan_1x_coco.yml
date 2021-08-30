@@ -1,0 +1,12 @@
+_BASE_: [
+  '../datasets/coco_detection.yml',
+  '../runtime.yml',
+  '_base_/gfl_r50vd_pan.yml',
+  '_base_/optimizer_1x.yml',
+  '_base_/gfl_ppdet_reader.yml',
+]
+
+weights: output/gfl_r50vd_pan_1x_coco/model_final
+find_unused_parameters: True
+log_iter: 100
+snapshot_epoch: 2

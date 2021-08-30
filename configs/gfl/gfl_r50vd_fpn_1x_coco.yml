@@ -1,0 +1,20 @@
+_BASE_: [
+  '../datasets/coco_detection.yml',
+  '../runtime.yml',
+  '_base_/gfl_r50_fpn.yml',
+  '_base_/optimizer_1x.yml',
+  '_base_/gfl_reader.yml',
+]
+
+weights: output/gfl_r50vd_fpn_1x_coco/model_final
+find_unused_parameters: True
+pretrain_weights: https://paddledet.bj.bcebos.com/models/pretrained/ResNet50_vd_ssld_pretrained.pdparams
+
+
+ResNet:
+  depth: 50
+  variant: d
+  norm_type: bn
+  freeze_at: 0
+  return_idx: [1, 2, 3]
+  num_stages: 4
