@@ -28,7 +28,7 @@ GFLHead:
     num_convs: 4
     norm_type: "gn"
     use_dcn: false
-  fpn_stride: [8, 16, 32]
+  fpn_stride: [8, 16, 32, 64, 128]
   prior_prob: 0.01
   reg_max: 16
   loss_qfl:
@@ -48,4 +48,4 @@ GFLHead:
     keep_top_k: 100
     score_threshold: 0.025
     nms_threshold: 0.6
-  use_yolopan: True
+  use_yolopan: False

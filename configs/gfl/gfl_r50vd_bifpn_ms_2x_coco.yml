@@ -2,15 +2,20 @@ _BASE_: [
   '../datasets/coco_detection.yml',
   '../runtime.yml',
   '_base_/gfl_r50_fpn.yml',
-  '_base_/optimizer_1x.yml',
-  '_base_/gfl_reader.yml',
+  '_base_/optimizer_2x.yml',
+  '_base_/gfl_reader_ms.yml',
 ]
 
-weights: output/gfl_r50vd_fpn_1x_coco/model_final
+weights: output/gfl_r50vd_bifpn_ms_2x_coco/model_final
 find_unused_parameters: True
 pretrain_weights: https://paddledet.bj.bcebos.com/models/pretrained/ResNet50_vd_ssld_pretrained.pdparams
 log_iter: 100
 snapshot_epoch: 2
+
+GFL:
+  backbone: ResNet
+  neck: BiFPN
+  head: GFLHead
 
 ResNet:
   depth: 50
@@ -19,3 +24,7 @@ ResNet:
   freeze_at: 0
   return_idx: [1, 2, 3]
   num_stages: 4
+
+BiFPN:
+  out_channel: 256
+  num_extra_levels: 2
