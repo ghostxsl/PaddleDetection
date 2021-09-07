@@ -27,6 +27,7 @@ if parent_path not in sys.path:
 import argparse
 import time
 import yaml
+import glob
 import ast
 from functools import reduce
 
@@ -438,6 +439,37 @@ def load_predictor(model_dir,
     return predictor
 
 
+def get_test_images(infer_dir, infer_img):
+    """
+    Get image path list in TEST mode
+    """
+    assert infer_img is not None or infer_dir is not None, \
+        "--infer_img or --infer_dir should be set"
+    assert infer_img is None or os.path.isfile(infer_img), \
+            "{} is not a file".format(infer_img)
+    assert infer_dir is None or os.path.isdir(infer_dir), \
+            "{} is not a directory".format(infer_dir)
+
+    # infer_img has a higher priority
+    if infer_img and os.path.isfile(infer_img):
+        return [infer_img]
+
+    images = set()
+    infer_dir = os.path.abspath(infer_dir)
+    assert os.path.isdir(infer_dir), \
+        "infer_dir {} is not a directory".format(infer_dir)
+    exts = ['jpg', 'jpeg', 'png', 'bmp']
+    exts += [ext.upper() for ext in exts]
+    for ext in exts:
+        images.update(glob.glob('{}/*.{}'.format(infer_dir, ext)))
+    images = list(images)
+
+    assert len(images) > 0, "no image found in {}".format(infer_dir)
+    print("Found {} inference images in total.".format(len(images)))
+
+    return images
+
+
 def load_executor(model_dir, device='CPU'):
     if device == 'GPU':
         place = fluid.CUDAPlace(0)
@@ -480,23 +512,24 @@ def print_arguments(args):
     print('------------------------------------------')
 
 
-def predict_image(detector):
-    if FLAGS.run_benchmark:
-        detector.predict(
-            FLAGS.image_file,
-            FLAGS.threshold,
-            warmup=100,
-            repeats=100,
-            run_benchmark=True)
-    else:
-        results = detector.predict(FLAGS.image_file, FLAGS.threshold)
-        visualize(
-            FLAGS.image_file,
-            results,
-            detector.config.labels,
-            mask_resolution=detector.config.mask_resolution,
-            output_dir=FLAGS.output_dir,
-            threshold=FLAGS.threshold)
+def predict_image(detector, image_list):
+    for image_name in image_list:
+        if FLAGS.run_benchmark:
+            detector.predict(
+                image_name,
+                FLAGS.threshold,
+                warmup=100,
+                repeats=100,
+                run_benchmark=True)
+        else:
+            results = detector.predict(image_name, FLAGS.threshold)
+            visualize(
+                image_name,
+                results,
+                detector.config.labels,
+                mask_resolution=detector.config.mask_resolution,
+                output_dir=FLAGS.output_dir,
+                threshold=FLAGS.threshold)
 
 
 def predict_video(detector, camera_id):
@@ -553,8 +586,9 @@ def main():
             run_mode=FLAGS.run_mode,
             trt_calib_mode=FLAGS.trt_calib_mode)
     # predict from image
+    img_list = get_test_images(FLAGS.image_dir, FLAGS.image_file)
     if FLAGS.image_file != '':
-        predict_image(detector)
+        predict_image(detector, img_list)
     # predict from video file or camera video stream
     if FLAGS.video_file != '' or FLAGS.camera_id != -1:
         predict_video(detector, FLAGS.camera_id)
@@ -574,7 +608,12 @@ if __name__ == '__main__':
               "'infer_cfg.yml', created by tools/export_model.py."),
         required=True)
     parser.add_argument(
-        "--image_file", type=str, default='', help="Path of image file.")
+        "--image_file", type=str, default=None, help="Path of image file.")
+    parser.add_argument(
+        "--image_dir",
+        type=str,
+        default=None,
+        help="Dir of image file, `image_file` has a higher priority.")
     parser.add_argument(
         "--video_file", type=str, default='', help="Path of video file.")
     parser.add_argument(
