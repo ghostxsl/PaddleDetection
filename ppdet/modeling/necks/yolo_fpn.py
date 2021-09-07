@@ -20,7 +20,9 @@ from ppdet.modeling.layers import DropBlock
 from ..backbones.darknet import ConvBNLayer
 from ..shape_spec import ShapeSpec
 
-__all__ = ['YOLOv3FPN', 'PPYOLOFPN', 'PPYOLOTinyFPN', 'PPYOLOPAN']
+__all__ = [
+    'YOLOv3FPN', 'PPYOLOFPN', 'PPYOLOTinyFPN', 'PPYOLOPAN', 'PPYOLOPANv2'
+]
 
 
 def add_coord(x, data_format):
