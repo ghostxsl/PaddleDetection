@@ -19,6 +19,11 @@ from __future__ import print_function
 import paddle
 import paddle.nn.functional as F
 
+__all__ = [
+    'pad_gt', 'gather_topk_anchors', 'check_points_inside_bboxes',
+    'compute_max_iou_anchor', 'compute_max_iou_gt'
+]
+
 
 def pad_gt(gt_labels, gt_bboxes, gt_scores=None):
     r""" Pad 0 in gt_labels and gt_bboxes.

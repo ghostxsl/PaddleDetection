@@ -15,7 +15,9 @@
 from . import utils
 from . import task_aligned_assigner
 from . import atss_assigner
+from . import sim_ota_assigner
 
 from .utils import *
 from .task_aligned_assigner import *
 from .atss_assigner import *
+from .sim_ota_assigner import *

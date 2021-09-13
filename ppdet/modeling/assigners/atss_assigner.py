@@ -27,6 +27,8 @@ from ..bbox_utils import bbox_center
 from .utils import (pad_gt, check_points_inside_bboxes, compute_max_iou_anchor,
                     compute_max_iou_gt)
 
+__all__ = ['ATSSAssigner']
+
 
 @register
 class ATSSAssigner(nn.Layer):

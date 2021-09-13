@@ -25,21 +25,49 @@ from ..bbox_utils import iou_similarity
 from .utils import (pad_gt, gather_topk_anchors, check_points_inside_bboxes,
                     compute_max_iou_anchor)
 
-__all__ = ['TaskAlignedAssigner']
+__all__ = ['SimOTAAssigner']
 
 
 @register
-class TaskAlignedAssigner(nn.Layer):
-    """TOOD: Task-aligned One-stage Object Detection
+class SimOTAAssigner(nn.Layer):
+    """YOLOX: Exceeding YOLO Series in 2021
 
     """
 
-    def __init__(self, topk=13, alpha=1, beta=6, eps=1e-9):
-        super(TaskAlignedAssigner, self).__init__()
+    def __init__(self, topk=15, alpha=1., beta=5., eps=1e-9):
+        super(SimOTAAssigner, self).__init__()
         self.topk = topk
         self.alpha = alpha
         self.beta = beta
         self.eps = eps
+
+    def _get_dynamic_topk(self, metrics, ious, topk_mask):
+        batch_size, num_max_boxes, num_anchors = metrics.shape
+        topk_metrics, topk_idxs = paddle.topk(metrics, self.topk, axis=-1)
+        topk_idxs = paddle.where(topk_mask, topk_idxs,
+                                 paddle.zeros_like(topk_idxs))
+        is_in_topk = F.one_hot(topk_idxs, num_anchors).sum(axis=-2)
+        is_in_topk = paddle.where(is_in_topk > 1,
+                                  paddle.zeros_like(is_in_topk), is_in_topk)
+        ious_topk = paddle.index_sample(
+            ious.flatten(0, 1),
+            topk_idxs.flatten(0, 1)).reshape([batch_size, num_max_boxes, -1])
+        ious_topk *= topk_mask
+        dynamic_topk = ious_topk.sum(-1).floor().clip(
+            max=self.topk - 1).astype('int32')
+        batch_ind = paddle.arange(end=batch_size, dtype='int32').unsqueeze(-1)
+        num_boxes_ind = paddle.arange(
+            end=num_max_boxes, dtype='int32').unsqueeze(0)
+        batch_ind = paddle.stack(
+            [
+                batch_ind.tile([1, num_max_boxes]),
+                num_boxes_ind.tile([batch_size, 1]), dynamic_topk
+            ],
+            axis=-1)
+        dynamic_threshold = paddle.gather_nd(ious_topk, batch_ind).unsqueeze(-1)
+        is_in_topk = paddle.where(ious > dynamic_threshold, is_in_topk,
+                                  paddle.zeros_like(is_in_topk))
+        return is_in_topk.astype(metrics.dtype)
 
     @paddle.no_grad()
     def forward(self,
@@ -52,7 +80,7 @@ class TaskAlignedAssigner(nn.Layer):
                 gt_scores=None):
         r"""The assignment is done in following steps
 
-        1. compute alignment metric between all bbox (bbox of all pyramid levels) and gt
+        1. compute reg+cls loss between all bbox (bbox of all pyramid levels) and gt
         2. select top-k bbox as candidates for each gt
         3. limit the positive sample's center in gt (because the anchor-free detector
            only can predict positive distance)
@@ -72,7 +100,7 @@ class TaskAlignedAssigner(nn.Layer):
         Returns:
             assigned_labels (Tensor): (B, L)
             assigned_bboxes (Tensor): (B, L, 4)
-            assigned_scores (Tensor): (B, L, C)
+            assigned_scores (Tensor): (B, L, 1)
         """
         assert pred_scores.ndim == pred_bboxes.ndim
 
@@ -93,19 +121,18 @@ class TaskAlignedAssigner(nn.Layer):
         gt_labels_ind = paddle.stack(
             [batch_ind.tile([1, num_max_boxes]), gt_labels.squeeze(-1)],
             axis=-1)
-        bbox_cls_scores = paddle.gather_nd(pred_scores, gt_labels_ind)
-        # compute alignment metrics, [B, n, L]
-        alignment_metrics = bbox_cls_scores.pow(self.alpha) * ious.pow(
-            self.beta)
+        conf_scores = paddle.gather_nd(pred_scores, gt_labels_ind)
+        # compute metrics, [B, n, L]
+        loss_metrics = self.alpha * conf_scores + self.beta * ious
 
         # check the positive sample's center in gt, [B, n, L]
         is_in_gts = check_points_inside_bboxes(anchor_points, gt_bboxes)
 
         # select topk largest alignment metrics pred bbox as candidates
         # for each gt, [B, n, L]
-        is_in_topk = gather_topk_anchors(
-            alignment_metrics * is_in_gts,
-            self.topk,
+        is_in_topk = self._get_dynamic_topk(
+            loss_metrics * is_in_gts,
+            ious,
             topk_mask=pad_gt_mask.tile([1, 1, self.topk]).astype(paddle.bool))
 
         # select positive sample, [B, n, L]
@@ -139,15 +166,6 @@ class TaskAlignedAssigner(nn.Layer):
             gt_bboxes.reshape([-1, 4]), assigned_gt_index.flatten(), axis=0)
         assigned_bboxes = assigned_bboxes.reshape([batch_size, num_anchors, 4])
 
-        assigned_scores = F.one_hot(assigned_labels, num_classes)
-        # rescale alignment metrics
-        alignment_metrics *= mask_positive
-        max_metrics_per_instance = alignment_metrics.max(axis=-1, keepdim=True)
-        max_ious_per_instance = (ious * mask_positive).max(axis=-1,
-                                                           keepdim=True)
-        alignment_metrics = alignment_metrics / (
-            max_metrics_per_instance + self.eps) * max_ious_per_instance
-        alignment_metrics = alignment_metrics.max(-2).unsqueeze(-1)
-        assigned_scores = assigned_scores * alignment_metrics
+        assigned_scores = (ious * mask_positive).max(-2).unsqueeze(-1)
 
         return assigned_labels, assigned_bboxes, assigned_scores

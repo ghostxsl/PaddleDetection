@@ -1,0 +1,42 @@
+architecture: YOLOv3
+pretrain_weights: https://paddledet.bj.bcebos.com/models/pretrained/ResNet50_vd_ssld_pretrained.pdparams
+norm_type: sync_bn
+use_ema: true
+ema_decay: 0.9998
+
+YOLOv3:
+  backbone: ResNet
+  neck: PPYOLOPAN
+  yolo_head: PPYOLOHead
+  post_process: ~
+
+ResNet:
+  depth: 50
+  variant: d
+  return_idx: [1, 2, 3]
+  freeze_at: -1
+  freeze_norm: false
+
+PPYOLOPAN:
+  drop_block: true
+  block_size: 3
+  keep_prob: 0.9
+  spp: true
+
+PPYOLOHead:
+  fpn_strides: [32, 16, 8]
+  grid_cell_scale: 5
+  grid_cell_offset: 0.5
+  iou_aware: true
+  iou_aware_factor: 0.5
+  loss_weight: {obj: 1.0, class: 1.0, bbox: 1.0, iou: 5.0, iou_aware: 1.0}
+  assigner:
+    name: ATSSAssigner
+    topk: 15
+    force_gt_matching: False
+  nms:
+    name: MultiClassNMS
+    nms_top_k: 1000
+    keep_top_k: 100
+    score_threshold: 0.05
+    nms_threshold: 0.6

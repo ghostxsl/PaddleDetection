@@ -28,6 +28,8 @@ from ppdet.modeling.bbox_utils import bbox_center
 from ..losses import GIoULoss
 from paddle.vision.ops import deform_conv2d
 
+__all__ = ['TOODHead']
+
 
 class ConvNormLayer(nn.Layer):
     def __init__(self,
