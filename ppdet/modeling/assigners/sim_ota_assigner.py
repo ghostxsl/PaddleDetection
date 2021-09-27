@@ -22,7 +22,7 @@ import paddle.nn.functional as F
 
 from ppdet.core.workspace import register
 from ..bbox_utils import iou_similarity
-from .utils import (pad_gt, gather_topk_anchors, check_points_inside_bboxes,
+from .utils import (pad_gt, compute_max_iou_gt, check_points_inside_bboxes,
                     compute_max_iou_anchor)
 
 __all__ = ['SimOTAAssigner']
@@ -34,11 +34,19 @@ class SimOTAAssigner(nn.Layer):
 
     """
 
-    def __init__(self, topk=15, alpha=1., beta=5., eps=1e-9):
+    def __init__(self,
+                 topk=10,
+                 alpha=1.,
+                 beta=3.,
+                 center_radius=2.5,
+                 force_gt_matching=False,
+                 eps=1e-9):
         super(SimOTAAssigner, self).__init__()
         self.topk = topk
         self.alpha = alpha
         self.beta = beta
+        self.center_radius = center_radius
+        self.force_gt_matching = force_gt_matching
         self.eps = eps
 
     def _get_dynamic_topk(self, metrics, ious, topk_mask):
@@ -46,9 +54,10 @@ class SimOTAAssigner(nn.Layer):
         topk_metrics, topk_idxs = paddle.topk(metrics, self.topk, axis=-1)
         topk_idxs = paddle.where(topk_mask, topk_idxs,
                                  paddle.zeros_like(topk_idxs))
-        is_in_topk = F.one_hot(topk_idxs, num_anchors).sum(axis=-2)
-        is_in_topk = paddle.where(is_in_topk > 1,
-                                  paddle.zeros_like(is_in_topk), is_in_topk)
+        is_in_topk_candidates = F.one_hot(topk_idxs, num_anchors).sum(axis=-2)
+        is_in_topk_candidates = paddle.where(
+            is_in_topk_candidates > 1,
+            paddle.zeros_like(is_in_topk_candidates), is_in_topk_candidates)
         ious_topk = paddle.index_sample(
             ious.flatten(0, 1),
             topk_idxs.flatten(0, 1)).reshape([batch_size, num_max_boxes, -1])
@@ -65,15 +74,18 @@ class SimOTAAssigner(nn.Layer):
             ],
             axis=-1)
         dynamic_threshold = paddle.gather_nd(ious_topk, batch_ind).unsqueeze(-1)
-        is_in_topk = paddle.where(ious > dynamic_threshold, is_in_topk,
-                                  paddle.zeros_like(is_in_topk))
-        return is_in_topk.astype(metrics.dtype)
+        is_in_topk = paddle.where(ious > dynamic_threshold,
+                                  is_in_topk_candidates,
+                                  paddle.zeros_like(is_in_topk_candidates))
+        return is_in_topk.astype(metrics.dtype), is_in_topk_candidates.astype(
+            metrics.dtype)
 
     @paddle.no_grad()
     def forward(self,
                 pred_scores,
                 pred_bboxes,
                 anchor_points,
+                stride_tensor,
                 gt_labels,
                 gt_bboxes,
                 bg_index,
@@ -91,6 +103,7 @@ class SimOTAAssigner(nn.Layer):
             pred_scores (Tensor, float32): predicted class probability, shape(B, L, C)
             pred_bboxes (Tensor, float32): predicted bounding boxes, shape(B, L, 4)
             anchor_points (Tensor, float32): pre-defined anchors, shape(L, 2), "cxcy" format
+            stride_tensor (Tensor, float32): stride of features, shape(L, 1)
             gt_labels (Tensor|List[Tensor], int64): Label of gt_bboxes, shape(B, n, 1)
             gt_bboxes (Tensor|List[Tensor], float32): Ground truth bboxes, shape(B, n, 4)
             bg_index (int): background index
@@ -100,7 +113,8 @@ class SimOTAAssigner(nn.Layer):
         Returns:
             assigned_labels (Tensor): (B, L)
             assigned_bboxes (Tensor): (B, L, 4)
-            assigned_scores (Tensor): (B, L, 1)
+            assigned_ious (Tensor): (B, L, 1)
+            ignore_mask (Tensor): (B, L)
         """
         assert pred_scores.ndim == pred_bboxes.ndim
 
@@ -123,14 +137,16 @@ class SimOTAAssigner(nn.Layer):
             axis=-1)
         conf_scores = paddle.gather_nd(pred_scores, gt_labels_ind)
         # compute metrics, [B, n, L]
-        loss_metrics = self.alpha * conf_scores + self.beta * ious
+        loss_metrics = conf_scores.pow(self.alpha) * ious.pow(self.beta)
 
         # check the positive sample's center in gt, [B, n, L]
-        is_in_gts = check_points_inside_bboxes(anchor_points, gt_bboxes)
+        stride_tensor *= self.center_radius
+        is_in_gts = check_points_inside_bboxes(anchor_points, gt_bboxes,
+                                               stride_tensor)
 
         # select topk largest alignment metrics pred bbox as candidates
         # for each gt, [B, n, L]
-        is_in_topk = self._get_dynamic_topk(
+        is_in_topk, is_in_topk_candidates = self._get_dynamic_topk(
             loss_metrics * is_in_gts,
             ious,
             topk_mask=pad_gt_mask.tile([1, 1, self.topk]).astype(paddle.bool))
@@ -146,6 +162,14 @@ class SimOTAAssigner(nn.Layer):
                 [1, num_max_boxes, 1])
             is_max_iou = compute_max_iou_anchor(ious)
             mask_positive = paddle.where(mask_multiple_gts, is_max_iou,
+                                         mask_positive)
+            mask_positive_sum = mask_positive.sum(axis=-2)
+        # make sure every gt_bbox matches the anchor
+        if self.force_gt_matching:
+            is_max_iou = compute_max_iou_gt(ious) * pad_gt_mask
+            mask_max_iou = (is_max_iou.sum(-2, keepdim=True) == 1).tile(
+                [1, num_max_boxes, 1])
+            mask_positive = paddle.where(mask_max_iou, is_max_iou,
                                          mask_positive)
             mask_positive_sum = mask_positive.sum(axis=-2)
         assigned_gt_index = mask_positive.argmax(axis=-2)
@@ -166,6 +190,6 @@ class SimOTAAssigner(nn.Layer):
             gt_bboxes.reshape([-1, 4]), assigned_gt_index.flatten(), axis=0)
         assigned_bboxes = assigned_bboxes.reshape([batch_size, num_anchors, 4])
 
-        assigned_scores = (ious * mask_positive).max(-2).unsqueeze(-1)
+        ignore_mask = is_in_topk_candidates.max(-2) - mask_positive_sum
 
-        return assigned_labels, assigned_bboxes, assigned_scores
+        return assigned_labels, assigned_bboxes, ignore_mask

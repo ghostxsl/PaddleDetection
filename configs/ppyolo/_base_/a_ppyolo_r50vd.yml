@@ -29,7 +29,7 @@ PPYOLOHead:
   grid_cell_offset: 0.5
   iou_aware: true
   iou_aware_factor: 0.5
-  loss_weight: {obj: 1.0, class: 1.0, bbox: 1.0, iou: 5.0, iou_aware: 1.0}
+  loss_weight: {obj: 1.0, class: 1.0, bbox: 2.0, iou: 5.0, iou_aware: 1.0}
   assigner:
     name: ATSSAssigner
     topk: 15

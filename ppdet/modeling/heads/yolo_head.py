@@ -4,6 +4,8 @@ import paddle.nn.functional as F
 from paddle import ParamAttr
 from paddle.regularizer import L2Decay
 from ppdet.core.workspace import register
+from paddle.fluid import core
+from paddle.fluid.dygraph import parallel_helper
 from ..bbox_utils import bbox_center
 from ..losses import GIoULoss
 from ..ops import iou_similarity
@@ -238,7 +240,7 @@ class PPYOLOHead(nn.Layer):
 
         anchors = paddle.concat(anchors)
         anchors.stop_gradient = True
-        stride_tensor_list = paddle.concat(stride_tensor_list)
+        stride_tensor_list = paddle.concat(stride_tensor_list).unsqueeze(0)
         stride_tensor_list.stop_gradient = True
 
         if self.training:
@@ -280,15 +282,37 @@ class PPYOLOHead(nn.Layer):
         weight = paddle.where(target, target_scores,
                               paddle.ones_like(target_scores))
         loss = F.binary_cross_entropy_with_logits(
-            pred_obj, target.astype(pred_obj.dtype), reduction='none') * weight
-        return loss.sum()
+            pred_obj,
+            target.astype(pred_obj.dtype),
+            weight=weight,
+            reduction='sum')
+        return loss
+
+    def _iou_loss(self, pbox, gbox, eps=1e-9):
+        px1, py1, px2, py2 = pbox.split(4, axis=-1)
+        gx1, gy1, gx2, gy2 = gbox.split(4, axis=-1)
+        x1 = paddle.maximum(px1, gx1)
+        y1 = paddle.maximum(py1, gy1)
+        x2 = paddle.minimum(px2, gx2)
+        y2 = paddle.minimum(py2, gy2)
+
+        overlap = ((x2 - x1).clip(0)) * ((y2 - y1).clip(0))
+
+        area1 = (px2 - px1) * (py2 - py1)
+        area1 = area1.clip(0)
+
+        area2 = (gx2 - gx1) * (gy2 - gy1)
+        area2 = area2.clip(0)
+
+        union = area1 + area2 - overlap + eps
+        iou = overlap / union
+        return 1 - iou.pow(2.0)
 
     def get_loss(self, head_outs, gt_meta):
         yolo_outputs, anchors, num_anchors_list, stride_tensor_list = head_outs
         gt_labels = gt_meta['gt_class']
         gt_bboxes = gt_meta['gt_bbox']
         gt_scores = gt_meta['gt_score'] if 'gt_score' in gt_meta else None
-        stride_tensor_list.unsqueeze_(0)
 
         if self.iou_aware:
             pred_scores, pred_dist, pred_obj, pred_iou_aware = yolo_outputs.split(
@@ -297,7 +321,7 @@ class PPYOLOHead(nn.Layer):
             pred_scores, pred_dist, pred_obj = yolo_outputs.split(
                 [self.num_classes, 4, 1], axis=-1)
 
-        assigned_labels, assigned_bboxes, assigned_scores = self.assigner(
+        assigned_labels, assigned_bboxes, assigned_scores, _ = self.assigner(
             anchors,
             num_anchors_list,
             gt_labels,
@@ -308,7 +332,7 @@ class PPYOLOHead(nn.Layer):
         assigned_bboxes /= stride_tensor_list
 
         # obj loss
-        loss_obj = self._obj_loss(pred_obj.squeeze(-1), assigned_scores.sum(-1))
+        loss_obj = self._obj_loss(pred_obj, assigned_scores)
 
         mask_positive = (assigned_labels != self.num_classes)
         num_pos = mask_positive.astype(paddle.float32).sum()
@@ -319,9 +343,10 @@ class PPYOLOHead(nn.Layer):
             assigned_labels_one_hot = F.one_hot(assigned_labels,
                                                 self.num_classes)
             loss_cls = F.binary_cross_entropy_with_logits(
-                pred_scores, assigned_labels_one_hot,
-                reduction='none') * assigned_scores.sum(-1, keepdim=True)
-            loss_cls = loss_cls.sum() / assigned_scores_sum
+                pred_scores,
+                assigned_labels_one_hot,
+                weight=assigned_scores,
+                reduction='sum') / assigned_scores_sum
             # distance2bbox
             anchor_centers = bbox_center(anchors /
                                          stride_tensor_list.squeeze(0))
@@ -333,24 +358,27 @@ class PPYOLOHead(nn.Layer):
                                                    bbox_mask).reshape([-1, 4])
             assigned_bboxes_pos = paddle.masked_select(
                 assigned_bboxes, bbox_mask).reshape([-1, 4])
+            iou_weight = paddle.masked_select(
+                assigned_scores.squeeze(-1), mask_positive).unsqueeze(-1)
 
-            loss_l1 = F.l1_loss(pred_bboxes_pos, assigned_bboxes_pos)
+            loss_l1 = F.l1_loss(
+                pred_bboxes_pos, assigned_bboxes_pos,
+                reduction='none') * iou_weight
+            loss_l1 = loss_l1.sum() / assigned_scores_sum
 
-            ious = iou_similarity(pred_bboxes_pos, assigned_bboxes_pos)
-            ious = paddle.diag(ious)
-            loss_iou = self.iou_loss(pred_bboxes_pos,
-                                     assigned_bboxes_pos) * ious.unsqueeze(-1)
-            loss_iou = loss_iou.sum() / ious.sum()
+            loss_iou = self._iou_loss(pred_bboxes_pos,
+                                      assigned_bboxes_pos) * iou_weight
+            loss_iou = loss_iou.sum() / assigned_scores_sum
 
             if self.iou_aware:
-                iou_aware_weight = paddle.masked_select(
-                    assigned_scores.sum(-1), mask_positive)
+                ious = iou_similarity(pred_bboxes_pos, assigned_bboxes_pos)
+                ious = paddle.diag(ious)
                 pred_iou_aware_pos = paddle.masked_select(
                     pred_iou_aware.squeeze(-1), mask_positive)
                 loss_iou_aware = F.binary_cross_entropy_with_logits(
                     pred_iou_aware_pos,
                     ious.detach(),
-                    weight=iou_aware_weight,
+                    weight=iou_weight.squeeze(-1),
                     reduction='sum') / assigned_scores_sum
         else:
             loss_cls = paddle.zeros([1])
@@ -362,6 +390,7 @@ class PPYOLOHead(nn.Layer):
         loss_obj /= assigned_scores_sum.clip(min=1)
         loss = self.loss_weight['obj'] * loss_obj + \
                self.loss_weight['class'] * loss_cls + \
+               self.loss_weight['bbox'] * loss_l1 + \
                self.loss_weight['iou'] * loss_iou
         if self.iou_aware:
             loss += (self.loss_weight['iou_aware'] * loss_iou_aware)
@@ -394,7 +423,7 @@ class PPYOLOHead(nn.Layer):
         pred_scores = F.sigmoid(pred_scores) * pred_obj
         pred_scores = pred_scores.transpose([0, 2, 1])
 
-        pred_dist = pred_dist.exp() * stride_tensor_list.unsqueeze(0)
+        pred_dist = pred_dist.exp() * stride_tensor_list
         anchor_centers = bbox_center(anchors)
         pred_bboxes = self._batch_distance2bbox(
             anchor_centers.unsqueeze(0), pred_dist, img_shape)
@@ -407,9 +436,9 @@ class PPYOLOHead(nn.Layer):
 
 
 @register
-class YOLOXHeadv2(nn.Layer):
+class YOLOXHeadv3(nn.Layer):
     __shared__ = ['num_classes', 'data_format']
-    __inject__ = ['assigner', 'nms']
+    __inject__ = ['static_assigner', 'assigner', 'nms']
 
     def __init__(self,
                  in_channels=[1024, 512, 256],
@@ -418,14 +447,16 @@ class YOLOXHeadv2(nn.Layer):
                  fpn_strides=(32, 16, 8),
                  grid_cell_scale=5,
                  grid_cell_offset=0.5,
-                 ignore_thresh=0.7,
+                 ignore_obj=False,
+                 static_assigner_epoch=60,
+                 static_assigner='ATSSAssigner',
                  assigner='SimOTAAssigner',
                  nms='MultiClassNMS',
                  loss_weight={'obj': 1.0,
                               'class': 1.0,
                               'iou': 5.0},
                  data_format='NCHW'):
-        super(YOLOXHeadv2, self).__init__()
+        super(YOLOXHeadv3, self).__init__()
         assert len(in_channels) > 0, "in_channels length should > 0"
         self.in_channels = in_channels
         self.num_classes = num_classes
@@ -433,10 +464,12 @@ class YOLOXHeadv2(nn.Layer):
         self.fpn_strides = fpn_strides
         self.grid_cell_scale = grid_cell_scale
         self.grid_cell_offset = grid_cell_offset
-        self.ignore_thresh = ignore_thresh
+        self.ignore_obj = ignore_obj
         self.iou_loss = GIoULoss()
         self.loss_weight = loss_weight
 
+        self.static_assigner_epoch = static_assigner_epoch
+        self.static_assigner = static_assigner
         self.assigner = assigner
         self.nms = nms
         self.data_format = data_format
@@ -600,12 +633,25 @@ class YOLOXHeadv2(nn.Layer):
             return out_bboxes
         return bboxes
 
-    def _obj_loss(self, logit, label, score):
-        target = (label != self.num_classes).unsqueeze(-1)
-        weight = paddle.where(target, score, paddle.ones_like(score))
-        loss = F.binary_cross_entropy_with_logits(
-            logit, score, reduction='none') * weight
-        return loss.sum()
+    def _obj_loss(self, logit, ious, mask_positive, ignore_mask, gamma=2.0):
+        # use gFocal loss
+        logit_pos = paddle.masked_select(logit, mask_positive)
+        weight_pos = (F.sigmoid(logit_pos) - ious).pow(gamma)
+        loss_pos = F.binary_cross_entropy_with_logits(
+            logit_pos, ious, weight=weight_pos, reduction='sum')
+        if self.ignore_obj:
+            mask_negative = mask_positive.astype(
+                ignore_mask.dtype) + ignore_mask
+        else:
+            mask_negative = mask_positive.astype(ignore_mask.dtype)
+        logit_neg = paddle.masked_select(logit, mask_negative == 0)
+        weight_neg = F.sigmoid(logit_neg).pow(gamma)
+        loss_neg = F.binary_cross_entropy_with_logits(
+            logit_neg,
+            paddle.zeros_like(logit_neg),
+            weight=weight_neg,
+            reduction='sum')
+        return loss_pos + loss_neg
 
     def get_loss(self, head_outs, gt_meta):
         cls_logits, dist_preds, obj_logits, anchors, num_anchors_list, stride_tensor_list = head_outs
@@ -613,60 +659,89 @@ class YOLOXHeadv2(nn.Layer):
         gt_bboxes = gt_meta['gt_bbox']
         gt_scores = gt_meta['gt_score'] if 'gt_score' in gt_meta else None
 
-        pred_scores = F.sigmoid(cls_logits) * F.sigmoid(obj_logits)
+        # get scores
+        pred_scores = (F.sigmoid(cls_logits) * F.sigmoid(obj_logits)).sqrt()
         # distance2bbox
         anchor_centers = bbox_center(anchors)
         pred_bboxes = self._batch_distance2bbox(
             anchor_centers.unsqueeze(0), dist_preds.exp() * stride_tensor_list)
-        assigned_labels, assigned_bboxes, assigned_scores = self.assigner(
-            pred_scores.detach(),
-            pred_bboxes.detach(),
-            anchor_centers,
-            gt_labels,
-            gt_bboxes,
-            bg_index=self.num_classes,
-            gt_scores=gt_scores)
+
+        if gt_meta['epoch_id'] < self.static_assigner_epoch:
+            assigned_labels, assigned_bboxes, _, ignore_mask = self.static_assigner(
+                anchors,
+                num_anchors_list,
+                gt_labels,
+                gt_bboxes,
+                bg_index=self.num_classes,
+                gt_scores=gt_scores)
+        else:
+            assigned_labels, assigned_bboxes, ignore_mask = self.assigner(
+                pred_scores.detach(),
+                pred_bboxes.detach(),
+                anchor_centers,
+                stride_tensor_list.squeeze(0),
+                gt_labels,
+                gt_bboxes,
+                bg_index=self.num_classes,
+                gt_scores=gt_scores)
         # rescale bbox
         assigned_bboxes /= stride_tensor_list
         pred_bboxes /= stride_tensor_list
 
-        # obj loss
-        loss_obj = self._obj_loss(obj_logits, assigned_labels, assigned_scores)
-
         mask_positive = (assigned_labels != self.num_classes)
         num_pos = mask_positive.astype(paddle.float32).sum()
-        assigned_scores_sum = assigned_scores.sum()
         # pos/neg loss
         if num_pos > 0:
-            # cls
-            assigned_labels_one_hot = F.one_hot(assigned_labels,
-                                                self.num_classes)
-            loss_cls = F.binary_cross_entropy_with_logits(
-                cls_logits,
-                assigned_labels_one_hot,
-                weight=assigned_scores,
-                reduction='sum')
-            loss_cls /= assigned_scores_sum
             # l1 + iou
             bbox_mask = mask_positive.unsqueeze(-1).tile([1, 1, 4])
             pred_bboxes_pos = paddle.masked_select(pred_bboxes,
                                                    bbox_mask).reshape([-1, 4])
             assigned_bboxes_pos = paddle.masked_select(
                 assigned_bboxes, bbox_mask).reshape([-1, 4])
-            bbox_weight = paddle.masked_select(
-                assigned_scores.squeeze(-1), mask_positive).unsqueeze(-1)
+            ious = iou_similarity(pred_bboxes_pos, assigned_bboxes_pos)
+            ious = paddle.diag(ious.detach()).unsqueeze(-1)
+            ious_sum = ious.sum()
+            if core.is_compiled_with_dist(
+            ) and parallel_helper._is_parallel_ctx_initialized():
+                paddle.distributed.all_reduce(ious_sum)
+                ious_sum = paddle.clip(
+                    ious_sum / paddle.distributed.get_world_size(), min=1)
 
             loss_l1 = F.l1_loss(pred_bboxes_pos, assigned_bboxes_pos)
 
             loss_iou = self.iou_loss(pred_bboxes_pos,
-                                     assigned_bboxes_pos) * bbox_weight
-            loss_iou = loss_iou.sum() / bbox_weight.sum()
+                                     assigned_bboxes_pos) * ious
+            loss_iou = loss_iou.sum() / ious_sum
+            # cls
+            assigned_labels_one_hot = F.one_hot(assigned_labels,
+                                                self.num_classes)
+            cls_mask = mask_positive.unsqueeze(-1).tile(
+                [1, 1, self.num_classes])
+            pred_cls_pos = paddle.masked_select(cls_logits, cls_mask).reshape(
+                [-1, self.num_classes])
+            assigned_cls_pos = paddle.masked_select(assigned_labels_one_hot,
+                                                    cls_mask).reshape(
+                                                        [-1, self.num_classes])
+            loss_cls = F.binary_cross_entropy_with_logits(
+                pred_cls_pos, assigned_cls_pos, weight=ious, reduction='sum')
+            loss_cls /= ious_sum
+
+            # obj loss
+            loss_obj = self._obj_loss(
+                obj_logits.squeeze(-1),
+                ious.squeeze(-1), mask_positive, ignore_mask)
+            loss_obj /= ious_sum
         else:
             loss_cls = paddle.zeros([1])
             loss_l1 = paddle.zeros([1])
             loss_iou = paddle.zeros([1])
 
-        loss_obj /= assigned_scores_sum.clip(min=1)
+            # obj loss
+            target = paddle.zeros_like(obj_logits)
+            weight = (F.sigmoid(obj_logits) - target).pow(2)
+            loss_obj = F.binary_cross_entropy_with_logits(
+                obj_logits, target, weight=weight)
+
         loss = self.loss_weight['obj'] * loss_obj + \
                self.loss_weight['class'] * loss_cls + \
                self.loss_weight['iou'] * loss_iou
