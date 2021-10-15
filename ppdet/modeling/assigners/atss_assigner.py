@@ -27,6 +27,8 @@ from ..bbox_utils import bbox_center
 from .utils import (pad_gt, check_points_inside_bboxes, compute_max_iou_anchor,
                     compute_max_iou_gt)
 
+__all__ = ['ATSSAssigner']
+
 
 @register
 class ATSSAssigner(nn.Layer):
@@ -105,6 +107,7 @@ class ATSSAssigner(nn.Layer):
             assigned_labels (Tensor): (B, L)
             assigned_bboxes (Tensor): (B, L, 4)
             assigned_scores (Tensor): (B, L, C)
+            ignore_mask (Tensor): (B, L)
         """
         gt_labels, gt_bboxes, pad_gt_scores, pad_gt_mask = pad_gt(
             gt_labels, gt_bboxes, gt_scores)
@@ -126,12 +129,12 @@ class ATSSAssigner(nn.Layer):
 
         # 3. on each pyramid level, selecting topk closest candidates
         # based on the center distance, [B, n, L]
-        is_in_topk, topk_idxs = self._gather_topk_pyramid(
+        is_in_topk_candidates, topk_idxs = self._gather_topk_pyramid(
             gt2anchor_distances, num_anchors_list, pad_gt_mask)
 
         # 4. get corresponding iou for the these candidates, and compute the
         # mean and std, 5. set mean + std as the iou threshold
-        iou_candidates = ious * is_in_topk
+        iou_candidates = ious * is_in_topk_candidates
         iou_threshold = paddle.index_sample(
             iou_candidates.flatten(stop_axis=-2),
             topk_idxs.flatten(stop_axis=-2))
@@ -140,7 +143,7 @@ class ATSSAssigner(nn.Layer):
                         iou_threshold.std(axis=-1, keepdim=True)
         is_in_topk = paddle.where(
             iou_candidates > iou_threshold.tile([1, 1, num_anchors]),
-            is_in_topk, paddle.zeros_like(is_in_topk))
+            is_in_topk_candidates, paddle.zeros_like(is_in_topk_candidates))
 
         # 6. check the positive sample's center in gt, [B, n, L]
         is_in_gts = check_points_inside_bboxes(anchor_centers, gt_bboxes)
@@ -195,4 +198,6 @@ class ATSSAssigner(nn.Layer):
                                          paddle.zeros_like(gather_scores))
             assigned_scores *= gather_scores.unsqueeze(-1)
 
-        return assigned_labels, assigned_bboxes, assigned_scores
+        ignore_mask = is_in_topk_candidates.max(-2) - mask_positive_sum
+
+        return assigned_labels, assigned_bboxes, assigned_scores, ignore_mask

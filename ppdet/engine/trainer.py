@@ -304,12 +304,19 @@ class Trainer(object):
             self.start_epoch = load_weight(self.model.student_model, weights,
                                            self.optimizer)
         else:
-            self.start_epoch = load_weight(self.model, weights, self.optimizer)
+            self.start_epoch = load_weight(self.model, weights, self.optimizer,
+                                           self.ema if self.use_ema else None)
         logger.debug("Resume weights of epoch {}".format(self.start_epoch))
 
     def train(self, validate=False):
         assert self.mode == 'train', "Model not in 'train' mode"
         Init_mark = False
+
+        sync_bn = (getattr(self.cfg, 'norm_type', None) == 'sync_bn' and
+                   self.cfg.use_gpu and self._nranks > 1)
+        if sync_bn:
+            self.model = paddle.nn.SyncBatchNorm.convert_sync_batchnorm(
+                self.model)
 
         model = self.model
         if self.cfg.get('fleet', False):
@@ -389,11 +396,6 @@ class Trainer(object):
                     self.ema.update(self.model)
                 iter_tic = time.time()
 
-            # apply ema weight on model
-            if self.use_ema:
-                weight = copy.deepcopy(self.model.state_dict())
-                self.model.set_dict(self.ema.apply())
-
             self._compose_callback.on_epoch_end(self.status)
 
             if validate and (self._nranks < 2 or self._local_rank == 0) \
@@ -420,9 +422,14 @@ class Trainer(object):
                     self.status['save_best_model'] = True
                     self._eval_with_loader(self._eval_loader)
 
-            # restore origin weight on model
-            if self.use_ema:
-                self.model.set_dict(weight)
+                if self.use_ema:
+                    # apply ema weight on model
+                    weight = copy.deepcopy(self.model.state_dict())
+                    self.model.set_dict(self.ema.apply())
+                    with paddle.no_grad():
+                        self.status['ema_eval'] = True
+                        self._eval_with_loader(self._eval_loader)
+                    self.model.set_dict(weight)
 
     def _eval_with_loader(self, loader):
         sample_num = 0

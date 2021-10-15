@@ -29,6 +29,8 @@ from ..losses import GIoULoss
 from paddle.vision.ops import deform_conv2d
 from ppdet.modeling.layers import ConvNormLayer
 
+__all__ = ['TOODHead']
+
 
 class ScaleReg(nn.Layer):
     """
@@ -344,7 +346,7 @@ class TOODHead(nn.Layer):
         gt_bboxes = gt_meta['gt_bbox']
         # label assignment
         if gt_meta['epoch_id'] < self.static_assigner_epoch:
-            assigned_labels, assigned_bboxes, assigned_scores = self.static_assigner(
+            assigned_labels, assigned_bboxes, assigned_scores, _ = self.static_assigner(
                 anchors,
                 num_anchors_list,
                 gt_labels,

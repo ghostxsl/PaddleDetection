@@ -1,0 +1,81 @@
+_BASE_: [
+  '../datasets/coco_detection.yml',
+  '../runtime.yml',
+  './_base_/e_yolo_reader.yml',
+]
+
+log_iter: 100
+snapshot_epoch: 8
+weights: output/x_yolo_cd53_atss_simota_minicoco/model_final
+find_unused_parameters: True
+
+epoch: 180
+
+LearningRate:
+  base_lr: 0.01
+  schedulers:
+  - !PiecewiseDecay
+    gamma: 0.1
+    milestones:
+    - 120
+  - !LinearWarmup
+    start_factor: 0.
+    steps: 1000
+
+OptimizerBuilder:
+  optimizer:
+    momentum: 0.9
+    type: Momentum
+  regularizer:
+    factor: 0.0005
+    type: L2
+
+
+architecture: YOLOv3
+pretrain_weights: /paddle/cspdarknet53.pdparams
+norm_type: sync_bn
+use_ema: true
+ema_decay: 0.9998
+
+YOLOv3:
+  backbone: CSPDarkNet
+  neck: CustomPAN
+  yolo_head: YOLOXHeadv3
+  post_process: ~
+
+CSPDarkNet:
+  layers: 53
+  return_idx: [2, 3, 4]
+
+CustomPAN:
+  block_per_stage: 1
+  layer_per_block: 2
+  act: 'mish'
+  block_func: 'CSPFusionBlock'
+  block_size: 3
+  keep_prob: 0.9
+  spp: true
+
+YOLOXHeadv3:
+  fpn_strides: [32, 16, 8]
+  grid_cell_scale: 5
+  grid_cell_offset: 0.5
+  loss_weight: {obj: 1.0, class: 1.0, bbox: 1.0, iou: 5.0}
+  static_assigner_epoch: 600
+  ignore_obj: False
+  static_assigner:
+    name: ATSSAssigner
+    topk: 15
+    force_gt_matching: False
+  assigner:
+    name: SimOTAv2Assigner
+    topk: 10
+    alpha: 1.0
+    beta: 3.0
+    force_gt_matching: False
+  nms:
+    name: MultiClassNMS
+    nms_top_k: 1000
+    keep_top_k: 100
+    score_threshold: 0.05
+    nms_threshold: 0.6

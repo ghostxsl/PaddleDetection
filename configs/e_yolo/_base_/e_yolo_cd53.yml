@@ -1,0 +1,42 @@
+architecture: YOLOv3
+pretrain_weights: /paddle/cspdarknet53.pdparams
+norm_type: sync_bn
+use_ema: true
+ema_decay: 0.9998
+
+YOLOv3:
+  backbone: CSPDarkNet
+  neck: CustomPAN
+  yolo_head: PPYOLOHead
+  post_process: ~
+
+CSPDarkNet:
+  layers: 53
+  return_idx: [2, 3, 4]
+
+CustomPAN:
+  block_per_stage: 1
+  layer_per_block: 2
+  act: 'mish'
+  block_func: 'CSPFusionBlock'
+  block_size: 3
+  keep_prob: 0.9
+  spp: true
+
+PPYOLOHead:
+  fpn_strides: [32, 16, 8]
+  grid_cell_scale: 5
+  grid_cell_offset: 0.5
+  iou_aware: true
+  iou_aware_factor: 0.5
+  loss_weight: {obj: 1.0, class: 1.0, bbox: 1.0, iou: 5.0, iou_aware: 1.0}
+  assigner:
+    name: ATSSAssigner
+    topk: 15
+    force_gt_matching: False
+  nms:
+    name: MultiClassNMS
+    nms_top_k: 1000
+    keep_top_k: 100
+    score_threshold: 0.05
+    nms_threshold: 0.6

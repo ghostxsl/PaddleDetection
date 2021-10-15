@@ -79,6 +79,8 @@ class ConvBNLayer(nn.Layer):
             out = F.leaky_relu(out, 0.1)
         elif self.act == 'mish':
             out = mish(out)
+        elif self.act == 'relu':
+            out = F.relu(out)
         return out
 
 

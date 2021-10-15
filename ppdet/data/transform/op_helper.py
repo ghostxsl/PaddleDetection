@@ -495,7 +495,7 @@ def transform_bbox(sample,
         (x.min(1), y.min(1), x.max(1), y.max(1))).reshape(4, n).T
     # clip boxes
     mask = filter_bbox(bbox, w, h, area_thr)
-    sample['gt_bbox'] = bbox[mask]
+    sample['gt_bbox'] = bbox[mask].astype(np.float32)
     sample['gt_class'] = sample['gt_class'][mask]
     if 'is_crowd' in sample:
         sample['is_crowd'] = sample['is_crowd'][mask]
