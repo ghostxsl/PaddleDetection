@@ -7,7 +7,7 @@ _BASE_: [
 
 log_iter: 100
 snapshot_epoch: 8
-weights: output/x_yolo_cd53_atss_simota_minicoco/model_final
+weights: output/e_yolo_cd53_tal_coco/model_final
 find_unused_parameters: True
 
 
@@ -20,7 +20,7 @@ ema_decay: 0.9998
 YOLOv3:
   backbone: CSPDarkNet
   neck: CustomPAN
-  yolo_head: YOLOXHeadv3
+  yolo_head: PPYOLOHead
   post_process: ~
 
 CSPDarkNet:
@@ -36,23 +36,21 @@ CustomPAN:
   keep_prob: 0.9
   spp: true
 
-YOLOXHeadv3:
+PPYOLOHead:
   fpn_strides: [32, 16, 8]
-  grid_cell_scale: 5
+  grid_cell_scale: 5.0
   grid_cell_offset: 0.5
-  loss_weight: {obj: 1.0, class: 1.0, bbox: 1.0, iou: 5.0}
-  static_assigner_epoch: 600
-  ignore_obj: False
+  loss_weight: {class: 1.0, bbox: 1.0, iou: 2.0}
+  static_assigner_epoch: 60
   static_assigner:
     name: ATSSAssigner
-    topk: 15
+    topk: 9
     force_gt_matching: False
   assigner:
-    name: SimOTAv2Assigner
-    topk: 10
+    name: TaskAlignedAssigner
+    topk: 13
     alpha: 1.0
-    beta: 3.0
-    force_gt_matching: False
+    beta: 6.0
   nms:
     name: MultiClassNMS
     nms_top_k: 1000

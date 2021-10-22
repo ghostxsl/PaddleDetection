@@ -17,9 +17,13 @@ from . import task_aligned_assigner
 from . import atss_assigner
 from . import simota_assigner
 from . import sim_ota_assigner
+from . import dtss_assigner
+from . import dtssv2_assigner
 
 from .utils import *
 from .task_aligned_assigner import *
 from .atss_assigner import *
 from .simota_assigner import *
 from .sim_ota_assigner import *
+from .dtss_assigner import *
+from .dtssv2_assigner import *

@@ -1,3 +1,16 @@
+_BASE_: [
+  '../datasets/coco_detection.yml',
+  '../runtime.yml',
+  './_base_/e_yolo_reader.yml',
+  './_base_/optimizer_180e.yml',
+]
+
+log_iter: 100
+snapshot_epoch: 8
+weights: output/s_yolo_cd53_dynamic_minicoco/model_final
+find_unused_parameters: True
+
+
 architecture: YOLOv3
 pretrain_weights: /paddle/cspdarknet53.pdparams
 norm_type: sync_bn
@@ -7,7 +20,7 @@ ema_decay: 0.9998
 YOLOv3:
   backbone: CSPDarkNet
   neck: CustomPAN
-  yolo_head: PPYOLOHead
+  yolo_head: PPYOLOHeadv2
   post_process: ~
 
 CSPDarkNet:
@@ -23,17 +36,19 @@ CustomPAN:
   keep_prob: 0.9
   spp: true
 
-PPYOLOHead:
+PPYOLOHeadv2:
   fpn_strides: [32, 16, 8]
   grid_cell_scale: 5
   grid_cell_offset: 0.5
-  iou_aware: true
-  iou_aware_factor: 0.5
-  loss_weight: {obj: 1.0, class: 1.0, bbox: 1.0, iou: 5.0, iou_aware: 1.0}
+  loss_weight: {obj: 1.0, class: 1.0, bbox: 1.0, iou: 5.0}
+  static_assigner_epoch: 600
+  ignore_obj: False
   assigner:
-    name: ATSSAssigner
+    name: DTSSAssigner
     topk: 15
-    force_gt_matching: False
+    alpha: 1.0
+    beta: 6.0
+    force_gt_matching: True
   nms:
     name: MultiClassNMS
     nms_top_k: 1000

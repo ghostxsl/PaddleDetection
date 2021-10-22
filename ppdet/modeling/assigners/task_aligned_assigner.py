@@ -45,6 +45,8 @@ class TaskAlignedAssigner(nn.Layer):
                 pred_scores,
                 pred_bboxes,
                 anchor_points,
+                num_anchors_list,
+                stride_tensor,
                 gt_labels,
                 gt_bboxes,
                 bg_index,
@@ -60,6 +62,8 @@ class TaskAlignedAssigner(nn.Layer):
             pred_scores (Tensor, float32): predicted class probability, shape(B, L, C)
             pred_bboxes (Tensor, float32): predicted bounding boxes, shape(B, L, 4)
             anchor_points (Tensor, float32): pre-defined anchors, shape(L, 2), "cxcy" format
+            num_anchors_list (List): num of anchors in each level
+            stride_tensor (Tensor, float32): stride of features, shape(L, 1)
             gt_labels (Tensor|List[Tensor], int64): Label of gt_bboxes, shape(B, n, 1)
             gt_bboxes (Tensor|List[Tensor], float32): Ground truth bboxes, shape(B, n, 4)
             bg_index (int): background index
@@ -79,6 +83,14 @@ class TaskAlignedAssigner(nn.Layer):
 
         batch_size, num_anchors, num_classes = pred_scores.shape
         _, num_max_boxes, _ = gt_bboxes.shape
+
+        # negative batch
+        if num_max_boxes == 0:
+            assigned_labels = paddle.full([batch_size, num_anchors], bg_index)
+            assigned_bboxes = paddle.zeros([batch_size, num_anchors, 4])
+            assigned_scores = paddle.zeros(
+                [batch_size, num_anchors, num_classes])
+            return assigned_labels, assigned_bboxes, assigned_scores
 
         # compute iou between gt and pred bbox, [B, n, L]
         ious = iou_similarity(gt_bboxes, pred_bboxes)
