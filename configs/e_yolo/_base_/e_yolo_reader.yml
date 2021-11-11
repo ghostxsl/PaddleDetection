@@ -21,7 +21,7 @@ TrainReader:
 EvalReader:
   sample_transforms:
     - Decode: {}
-    - Resize: {target_size: [640, 640], keep_ratio: False, interp: 2}
+    - Resize: {target_size: [640, 640], keep_ratio: False}
     - NormalizeImage: {mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225], is_scale: True}
     - Permute: {}
   batch_size: 2
@@ -31,7 +31,7 @@ TestReader:
     image_shape: [3, 640, 640]
   sample_transforms:
     - Decode: {}
-    - Resize: {target_size: [640, 640], keep_ratio: False, interp: 2}
+    - Resize: {target_size: [640, 640], keep_ratio: False}
     - NormalizeImage: {mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225], is_scale: True}
     - Permute: {}
   batch_size: 1

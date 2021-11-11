@@ -3149,3 +3149,210 @@ class CenterRandColor(BaseOperator):
             img = func(img, img_gray)
         sample['image'] = img
         return sample
+
+
+@register_op
+class PPMosaic(BaseOperator):
+    """
+    PaddlePaddle Mosaic Data Augmentation
+
+    Args:
+        target_size (int): The size of the output image. Default: 640
+        center_ratio (float|List[float]): Proportion of the area where the center
+            point is located in the whole map, uniformly sampled in
+            [0.5 - center_ratio, 0.5 + center_ratio]. Default: 0.25
+        scale (float|List[float]): uniformly sampled in [1 - scale, 1 + scale].
+            Default: 0.5
+        area_threshold (float): If the cropped bbox iou < area_threshold, drop it.
+        interp (int): the interpolation method.
+        fill_value (List[int]):
+    """
+
+    def __init__(self,
+                 target_size,
+                 center_ratio=0.25,
+                 scale=0.5,
+                 area_threshold=0.4,
+                 interp=cv2.INTER_LINEAR,
+                 fill_value=(123.675, 116.28, 103.53),
+                 mosaic_prob=1.0):
+        super(PPMosaic, self).__init__()
+        assert isinstance(target_size, int)
+        assert isinstance(center_ratio, (float, list, tuple))
+        assert isinstance(scale, (float, list, tuple))
+        self.target_size = target_size
+        self.mosaic_size = 2 * target_size
+        self.center_ratio = center_ratio
+        self.scale = scale
+        self.area_threshold = area_threshold
+        self.interp = interp
+        self.fill_value = fill_value
+        self.mosaic_prob = mosaic_prob
+        if isinstance(center_ratio, float):
+            self.center_ratio = (0.5 - center_ratio, 0.5 + center_ratio)
+        if isinstance(scale, float):
+            self.scale = (1 - scale, 1 + scale)
+
+    def apply_resize_bbox(self, bbox, scale, size, offset=(0, 0)):
+        im_scale_x, im_scale_y = scale
+        resize_w, resize_h = size
+        bbox[..., 0::2] *= im_scale_x
+        bbox[..., 1::2] *= im_scale_y
+        bbox[..., 0::2] = np.clip(bbox[..., 0::2], 0, resize_w)
+        bbox[..., 1::2] = np.clip(bbox[..., 1::2], 0, resize_h)
+        bbox[..., 0::2] += offset[0]
+        bbox[..., 1::2] += offset[1]
+        return bbox
+
+    def apply_crop_img_bbox(self, in_img, bbox, label, crop_size,
+                            offset=(0, 0)):
+        # make a shared image
+        h, w, c = in_img.shape
+        shared_img = np.stack(
+            [
+                np.full(
+                    [max(h, crop_size[1]), max(w, crop_size[0])],
+                    a,
+                    dtype=np.uint8) for a in self.fill_value
+            ],
+            axis=-1)
+        # put source image in shared image
+        start_h, start_w = 0, 0
+        if h < shared_img.shape[0]:
+            start_h = random.randint(0, shared_img.shape[0] - h)
+        if w < shared_img.shape[1]:
+            start_w = random.randint(0, shared_img.shape[1] - w)
+        shared_img[start_h:start_h + h, start_w:start_w + w] = in_img
+        bbox[..., 0::2] += start_w
+        bbox[..., 1::2] += start_h
+        # crop image
+        start_h, start_w = 0, 0
+        if crop_size[1] < shared_img.shape[0]:
+            start_h = random.randint(0, shared_img.shape[0] - crop_size[1])
+        if crop_size[0] < shared_img.shape[1]:
+            start_w = random.randint(0, shared_img.shape[1] - crop_size[0])
+        out_img = shared_img[start_h:start_h + crop_size[1], start_w:start_w +
+                             crop_size[0]]
+        # crop bbox and label
+        crop_bbox = bbox.copy()
+        crop_bbox[..., 0::2] = np.clip(crop_bbox[..., 0::2], start_w,
+                                       start_w + crop_size[0])
+        crop_bbox[..., 1::2] = np.clip(crop_bbox[..., 1::2], start_h,
+                                       start_h + crop_size[1])
+        area_ratio = ((crop_bbox[..., 2] - crop_bbox[..., 0]) * (
+            crop_bbox[..., 3] - crop_bbox[..., 1])) / (
+                (bbox[..., 2] - bbox[..., 0]) * (bbox[..., 3] - bbox[..., 1]))
+        mask = (area_ratio > self.area_threshold)
+        out_bbox = crop_bbox[mask]
+        out_bbox[..., 0::2] -= start_w
+        out_bbox[..., 1::2] -= start_h
+        out_bbox[..., 0::2] += offset[0]
+        out_bbox[..., 1::2] += offset[1]
+        out_label = label[mask]
+
+        return out_img, out_bbox, out_label
+
+    def _fill_mosaic_image(self,
+                           in_img,
+                           bboxes,
+                           labels,
+                           fill_region,
+                           out_img=None):
+        if out_img is None:
+            out_img = np.stack(
+                [
+                    np.full(
+                        [self.mosaic_size, self.mosaic_size],
+                        a,
+                        dtype=np.float32) for a in self.fill_value
+                ],
+                axis=-1)
+        x1, y1, x2, y2 = fill_region
+        region_size = (x2 - x1, y2 - y1)
+        h, w, c = in_img.shape
+        if random.random() < 0.5:
+            # just resize and then fill the region
+            in_img = cv2.resize(in_img, region_size, interpolation=self.interp)
+            bboxes = self.apply_resize_bbox(
+                bboxes, (region_size[0] / w, region_size[1] / h), region_size,
+                (x1, y1))
+            out_img[y1:y2, x1:x2] = in_img
+            return out_img, bboxes, labels
+        else:
+            # random crop and then fill the region
+            in_img, bboxes, labels = self.apply_crop_img_bbox(
+                in_img, bboxes, labels, region_size, (x1, y1))
+            out_img[y1:y2, x1:x2] = in_img
+            return out_img, bboxes, labels
+
+    def __call__(self, samples, context=None):
+        if not isinstance(samples, Sequence):
+            return samples
+
+        assert len(samples) == 4, \
+            'mosaic needs 4 images, but received %d.' % len(samples)
+
+        if random.random() < 1 - self.mosaic_prob:
+            # resize target image
+            sample = samples[0]
+            h, w, c = sample['image'].shape
+            target_size = (self.target_size, self.target_size)
+            scale_factor = (target_size[0] / w, target_size[1] / h)
+            sample['image'] = cv2.resize(
+                sample['image'], target_size, interpolation=self.interp)
+            sample['gt_bbox'] = self.apply_resize_bbox(
+                sample['gt_bbox'], scale_factor, target_size)
+            sample['im_shape'] = np.asarray(target_size, dtype=np.float32)
+            sample['scale_factor'] = np.asarray(
+                scale_factor[::-1], dtype=np.float32)
+            return sample
+
+        # sample a mosaic center
+        min_border, max_border = [
+            int(a * self.mosaic_size) for a in self.center_ratio
+        ]
+        x_center = random.randint(min_border, max_border)
+        y_center = random.randint(min_border, max_border)
+        # make 4 regions, "x1y1x2y2"format
+        fill_regions = [
+            [0, 0, x_center, y_center],
+            [x_center, 0, self.mosaic_size, y_center],
+            [0, y_center, x_center, self.mosaic_size],
+            [x_center, y_center, self.mosaic_size, self.mosaic_size]
+        ]
+        out_img = np.stack(
+            [
+                np.full(
+                    [self.mosaic_size, self.mosaic_size], a, dtype=np.float32)
+                for a in self.fill_value
+            ],
+            axis=-1)
+        # make mosaic image
+        out_bboxes = []
+        out_labels = []
+        for sample, fill_region in zip(samples, fill_regions):
+            out_img, out_bbox, out_label = self._fill_mosaic_image(
+                sample['image'], sample['gt_bbox'], sample['gt_class'],
+                fill_region, out_img)
+            out_bboxes.append(out_bbox)
+            out_labels.append(out_label)
+        out_bboxes = np.concatenate(out_bboxes, axis=0)
+        out_labels = np.concatenate(out_labels, axis=0)
+
+        # random resize and crop mosaic image to target image
+        scale = random.uniform(*self.scale)
+        out_img = cv2.resize(
+            out_img, None, fx=scale, fy=scale, interpolation=self.interp)
+        out_bboxes = self.apply_resize_bbox(
+            out_bboxes, (scale, scale), (out_img.shape[1], out_img.shape[0]))
+        out_img, out_bboxes, out_labels = self.apply_crop_img_bbox(
+            out_img, out_bboxes, out_labels,
+            (self.target_size, self.target_size))
+        sample = samples[0]
+        sample['image'] = out_img
+        sample['gt_bbox'] = out_bboxes
+        sample['gt_class'] = out_labels
+        sample['im_shape'] = np.asarray(
+            [self.target_size, self.target_size], dtype=np.float32)
+        sample['scale_factor'] = np.asarray([1.0, 1.0], dtype=np.float32)
+        return sample

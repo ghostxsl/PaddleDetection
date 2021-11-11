@@ -23,6 +23,7 @@ import paddle.nn.functional as F
 
 from ppdet.core.workspace import register
 from ..ops import iou_similarity
+from ..bbox_utils import iou_similarity as batch_iou_similarity
 from ..bbox_utils import bbox_center
 from .utils import (pad_gt, check_points_inside_bboxes, compute_max_iou_anchor,
                     compute_max_iou_gt)
@@ -80,7 +81,8 @@ class ATSSAssigner(nn.Layer):
                 gt_labels,
                 gt_bboxes,
                 bg_index,
-                gt_scores=None):
+                gt_scores=None,
+                pred_bboxes=None):
         r"""The assignment is done in following steps
         1. compute iou between all bbox (bbox of all pyramid levels) and gt
         2. compute center distance between all bbox and gt
@@ -103,6 +105,7 @@ class ATSSAssigner(nn.Layer):
             bg_index (int): background index
             gt_scores (Tensor|List[Tensor]|None, float32) Score of gt_bboxes,
                     shape(B, n, 1), if None, then it will initialize with one_hot label
+            pred_bboxes (Tensor, float32, optional): predicted bounding boxes, shape(B, L, 4)
         Returns:
             assigned_labels (Tensor): (B, L)
             assigned_bboxes (Tensor): (B, L, 4)
@@ -199,7 +202,11 @@ class ATSSAssigner(nn.Layer):
         assigned_bboxes = assigned_bboxes.reshape([batch_size, num_anchors, 4])
 
         assigned_scores = F.one_hot(assigned_labels, self.num_classes)
-        if gt_scores is not None:
+        if pred_bboxes is not None:
+            ious = batch_iou_similarity(gt_bboxes, pred_bboxes) * mask_positive
+            ious = ious.max(axis=-2).unsqueeze(-1)
+            assigned_scores *= ious
+        elif gt_scores is not None:
             gather_scores = paddle.gather(
                 pad_gt_scores.flatten(), assigned_gt_index.flatten(), axis=0)
             gather_scores = gather_scores.reshape([batch_size, num_anchors])

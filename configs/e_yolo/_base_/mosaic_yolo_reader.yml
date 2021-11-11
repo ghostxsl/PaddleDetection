@@ -4,14 +4,11 @@ TrainReader:
     - Decode: {}
     - RandomFlip: {prob: 0.5}
     - RandomDistort: {}
-    - Resize: {target_size: 640, keep_ratio: True, interp: 2}
-    - Mosaic: {target_size: 640}
-    - RandomPerspective: {degree: 0, translate: 0.1, scale: 0.5, shear: 0.0, perspective: 0.0, border: [-320, -320]}
+    - PPMosaic: {target_size: 640}
   batch_transforms:
-    - BatchRandomResize: {target_size: [320, 352, 384, 416, 448, 480, 512, 544, 576, 608, 640, 672, 704, 736, 768], random_size: True, random_interp: True, keep_ratio: False}
     - NormalizeImage: {mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225], is_scale: True}
     - Permute: {}
-  batch_size: 8
+  batch_size: 4
   shuffle: true
   drop_last: true
   mosaic_epoch: 25000
@@ -21,7 +18,7 @@ TrainReader:
 EvalReader:
   sample_transforms:
     - Decode: {}
-    - Resize: {target_size: [640, 640], keep_ratio: False, interp: 2}
+    - Resize: {target_size: [640, 640], keep_ratio: False}
     - NormalizeImage: {mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225], is_scale: True}
     - Permute: {}
   batch_size: 2
@@ -31,7 +28,7 @@ TestReader:
     image_shape: [3, 640, 640]
   sample_transforms:
     - Decode: {}
-    - Resize: {target_size: [640, 640], keep_ratio: False, interp: 2}
+    - Resize: {target_size: [640, 640], keep_ratio: False}
     - NormalizeImage: {mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225], is_scale: True}
     - Permute: {}
   batch_size: 1
