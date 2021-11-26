@@ -40,11 +40,13 @@ def txt_save(out_list, file_path):
         f.writelines(out_list)
 
 
-def replace_keyword_(out_list, key, value):
+# replace all str
+def replace_keyword_(out_list, old_str, new_str):
     for i, line in enumerate(out_list):
-        out_list[i] = line.replace(key, value)
+        out_list[i] = line.replace(old_str, new_str)
 
 
+# replace one line for `key`
 def replace_one_line_(out_list, key, new_str):
     for i, line in enumerate(out_list):
         temp = line.split(':')[0]
@@ -53,32 +55,51 @@ def replace_one_line_(out_list, key, new_str):
             break
 
 
-def replace_one_line_keyword_(out_list, key, old_str, new_str):
-    for i, line in enumerate(out_list):
-        temp = line.split(':')[0]
-        if key == temp:
-            out_list[i] = line.replace(old_str, new_str)
-            break
-
-
 def save_model_params(template_config,
                       configs_dir,
                       model,
                       postfix="train_infer_python.txt",
-                      slim=None,
-                      overwrite=False):
+                      slim=None):
+    if os.path.exists(os.path.join(configs_dir, f"{model[1]}_{postfix}")):
+        _benchmark = model[2].get("benchmark", None)
+        if _benchmark is None:
+            return
+        # add train_benchmark_params
+        out_config = txt_load(
+            os.path.join(configs_dir, f"{model[1]}_{postfix}"))
+        ind = 0
+        for i, line in enumerate(template_config):
+            if "train_benchmark_params" in line:
+                ind = i
+                break
+        template_config = copy.deepcopy(template_config[ind:])
+        # replace _benchmark_batch_size
+        _benchmark_batch_size = [str(a) for a in _benchmark["batch_size"]]
+        _benchmark_batch_size = "|".join(_benchmark_batch_size)
+        replace_keyword_(template_config, "_benchmark_batch_size",
+                         _benchmark_batch_size)
+        # replace _benchmark_fp_items
+        _benchmark_fp_items = "|".join(_benchmark["fp_items"])
+        replace_keyword_(template_config, "_benchmark_fp_items",
+                         _benchmark_fp_items)
+        # replace _benchmark_epoch
+        replace_keyword_(template_config, "_benchmark_epoch",
+                         str(_benchmark["epoch"]))
+
+        out_config += template_config
+        txt_save(out_config, os.path.join(configs_dir, f"{model[1]}_{postfix}"))
+        print(f'alter {model[1]}_{postfix} done. ')
+        return out_config
+
     out_config = copy.deepcopy(template_config)
     model = copy.deepcopy(model)
     # replace _template_model
     _template_model = model[2].get("config_dir", model[0])
     replace_keyword_(out_config, "_template_model", _template_model)
     # replace pretrain_weights or weights
-    if "weights_dir" in model[2].keys():
-        _template_weights = model[2]["weights_dir"] + model[1]
-        replace_one_line_keyword_(out_config, "pretrain_weights",
-                                  "_template_name", _template_weights)
-        replace_one_line_keyword_(out_config, "weights", "_template_name",
-                                  _template_weights)
+    _template_weights = model[2].get("weights_dir", "")
+    _template_weights += model[1]
+    replace_keyword_(out_config, "_template_weights", _template_weights)
     # replace _template_name
     replace_keyword_(out_config, "_template_name", model[1])
     # replace _template_epoch
@@ -102,10 +123,19 @@ def save_model_params(template_config,
         if slim == 'pact' or slim == 'kl_quant':
             replace_one_line_(out_config, 'infer_quant', 'True')
             replace_one_line_(out_config, '--run_mode', 'fluid|trt_int8')
-
-    if os.path.exists(os.path.join(configs_dir,
-                                   f"{model[1]}_{postfix}")) and not overwrite:
-        return out_config
+    _benchmark = model[2].get("benchmark", None)
+    if _benchmark is not None:
+        # replace _benchmark_batch_size
+        _benchmark_batch_size = [str(a) for a in _benchmark["batch_size"]]
+        _benchmark_batch_size = "|".join(_benchmark_batch_size)
+        replace_keyword_(out_config, "_benchmark_batch_size",
+                         _benchmark_batch_size)
+        # replace _benchmark_fp_items
+        _benchmark_fp_items = "|".join(_benchmark["fp_items"])
+        replace_keyword_(out_config, "_benchmark_fp_items", _benchmark_fp_items)
+        # replace _benchmark_epoch
+        replace_keyword_(out_config, "_benchmark_epoch",
+                         str(_benchmark["epoch"]))
 
     txt_save(out_config, os.path.join(configs_dir, f"{model[1]}_{postfix}"))
     print(f'save {model[1]}_{postfix} done. ')
@@ -125,6 +155,7 @@ def generate_tipc_configs(
     base_amp_template = txt_load(
         os.path.join(template_dir, template_file_name[1]))
     cpp_template = txt_load(os.path.join(template_dir, template_file_name[2]))
+
     for model_group, model_list in model_configs.items():
         count_model += len(model_list)
         print(f"build {model_group}...")
@@ -171,14 +202,15 @@ def generate_tipc_configs(
 
 
 if __name__ == '__main__':
-    utils_path = os.path.split(os.path.realpath(sys.argv[0]))[0]
-    tipc_path = os.path.split(utils_path)[0]
-    model_configs = json_load(os.path.join(utils_path, "model_configs.json"))
+    tools_path = os.path.split(os.path.realpath(sys.argv[0]))[0]
+    tipc_path = os.path.split(tools_path)[0]
+
     configs_dir = os.path.join(tipc_path, "configs")
     if not os.path.exists(configs_dir):
         os.makedirs(configs_dir)
 
+    model_configs = json_load(os.path.join(tools_path, "model_configs.json"))
     count_model = generate_tipc_configs(configs_dir, model_configs,
-                                        os.path.join(utils_path, "template"))
+                                        os.path.join(tools_path, "template"))
     print(f'num_total_models: {count_model}')
     print('Done!')
