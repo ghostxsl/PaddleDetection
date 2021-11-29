@@ -32,6 +32,10 @@ from . import detr_head
 from . import sparsercnn_head
 from . import tood_head
 from . import retina_head
+from . import ppta_head
+from . import task_attn_head
+from . import refine_head
+from . import yoloe_head
 
 from .bbox_head import *
 from .mask_head import *
@@ -53,3 +57,7 @@ from .detr_head import *
 from .sparsercnn_head import *
 from .tood_head import *
 from .retina_head import *
+from .ppta_head import *
+from .task_attn_head import *
+from .refine_head import *
+from .yoloe_head import *

@@ -103,7 +103,7 @@ class TaskAlignedAssigner(nn.Layer):
         bbox_cls_scores = paddle.gather_nd(pred_scores, gt_labels_ind)
         # compute alignment metrics, [B, n, L]
         alignment_metrics = bbox_cls_scores.pow(self.alpha) * ious.pow(
-            self.beta)
+                self.beta)
 
         # check the positive sample's center in gt, [B, n, L]
         is_in_gts = check_points_inside_bboxes(anchor_points, gt_bboxes)
