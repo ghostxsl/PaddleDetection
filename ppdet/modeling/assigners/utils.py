@@ -107,11 +107,15 @@ def gather_topk_anchors(metrics, topk, largest=True, topk_mask=None, eps=1e-9):
     return is_in_topk.astype(metrics.dtype)
 
 
-def check_points_inside_bboxes(points, bboxes, eps=1e-9):
+def check_points_inside_bboxes(points,
+                               bboxes,
+                               center_radius_tensor=None,
+                               eps=1e-9):
     r"""
     Args:
         points (Tensor, float32): shape[L, 2], "xy" format, L: num_anchors
         bboxes (Tensor, float32): shape[B, n, 4], "xmin, ymin, xmax, ymax" format
+        center_radius_tensor (Tensor, float32): shape [L, 1] Default: None.
         eps (float): Default: 1e-9
     Returns:
         is_in_bboxes (Tensor, float32): shape[B, n, L], value=1. means selected
@@ -119,6 +123,19 @@ def check_points_inside_bboxes(points, bboxes, eps=1e-9):
     points = points.unsqueeze([0, 1])
     x, y = points.chunk(2, axis=-1)
     xmin, ymin, xmax, ymax = bboxes.unsqueeze(2).chunk(4, axis=-1)
+    if center_radius_tensor is not None:
+        center_radius_tensor = center_radius_tensor.unsqueeze([0, 1])
+        bboxes_cx = (xmin + xmax) / 2.
+        bboxes_cy = (ymin + ymax) / 2.
+        xmin_sampling = bboxes_cx - center_radius_tensor
+        ymin_sampling = bboxes_cy - center_radius_tensor
+        xmax_sampling = bboxes_cx + center_radius_tensor
+        ymax_sampling = bboxes_cy + center_radius_tensor
+
+        xmin = paddle.maximum(xmin, xmin_sampling)
+        ymin = paddle.maximum(ymin, ymin_sampling)
+        xmax = paddle.minimum(xmax, xmax_sampling)
+        ymax = paddle.minimum(ymax, ymax_sampling)
     l = x - xmin
     t = y - ymin
     r = xmax - x

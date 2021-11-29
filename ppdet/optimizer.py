@@ -42,7 +42,7 @@ class CosineDecay(object):
             the max_iters is much larger than the warmup iter
     """
 
-    def __init__(self, max_epochs=1000, use_warmup=True, eta_min=0):
+    def __init__(self, max_epochs=1000, use_warmup=True, eta_min=0.):
         self.max_epochs = max_epochs
         self.use_warmup = use_warmup
         self.eta_min = eta_min
@@ -64,6 +64,7 @@ class CosineDecay(object):
                 decayed_lr = base_lr * 0.5 * (math.cos(
                     (i - warmup_iters) * math.pi /
                     (max_iters - warmup_iters)) + 1)
+                decayed_lr = decayed_lr if decayed_lr > self.eta_min else self.eta_min
                 value.append(decayed_lr)
             return optimizer.lr.PiecewiseDecay(boundary, value)
 
@@ -308,6 +309,11 @@ class ModelEMA(object):
         self.epoch = 0
         for k, v in self.state_dict.items():
             self.state_dict[k] = paddle.zeros_like(v)
+
+    def resume(self, state_dict, step):
+        for k, v in state_dict.items():
+            self.state_dict[k] = v
+        self.step = step
 
     def update(self, model):
         if self.use_thres_step:

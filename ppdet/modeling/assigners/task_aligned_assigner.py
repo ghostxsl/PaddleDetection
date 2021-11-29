@@ -25,6 +25,8 @@ from ..bbox_utils import iou_similarity
 from .utils import (pad_gt, gather_topk_anchors, check_points_inside_bboxes,
                     compute_max_iou_anchor)
 
+__all__ = ['TaskAlignedAssigner']
+
 
 @register
 class TaskAlignedAssigner(nn.Layer):
@@ -43,6 +45,8 @@ class TaskAlignedAssigner(nn.Layer):
                 pred_scores,
                 pred_bboxes,
                 anchor_points,
+                num_anchors_list,
+                stride_tensor,
                 gt_labels,
                 gt_bboxes,
                 bg_index,
@@ -61,6 +65,8 @@ class TaskAlignedAssigner(nn.Layer):
             pred_scores (Tensor, float32): predicted class probability, shape(B, L, C)
             pred_bboxes (Tensor, float32): predicted bounding boxes, shape(B, L, 4)
             anchor_points (Tensor, float32): pre-defined anchors, shape(L, 2), "cxcy" format
+            num_anchors_list (List): num of anchors in each level
+            stride_tensor (Tensor, float32): stride of features, shape(L, 1)
             gt_labels (Tensor|List[Tensor], int64): Label of gt_bboxes, shape(B, n, 1)
             gt_bboxes (Tensor|List[Tensor], float32): Ground truth bboxes, shape(B, n, 4)
             bg_index (int): background index
@@ -100,8 +106,11 @@ class TaskAlignedAssigner(nn.Layer):
             axis=-1)
         bbox_cls_scores = paddle.gather_nd(pred_scores, gt_labels_ind)
         # compute alignment metrics, [B, n, L]
-        alignment_metrics = bbox_cls_scores.pow(self.alpha) * ious.pow(
-            self.beta)
+        if self.alpha <= 0:
+            alignment_metrics = bbox_cls_scores.pow(ious) * ious.pow(1 - ious)
+        else:
+            alignment_metrics = bbox_cls_scores.pow(self.alpha) * ious.pow(
+                self.beta)
 
         # check the positive sample's center in gt, [B, n, L]
         is_in_gts = check_points_inside_bboxes(anchor_points, gt_bboxes)

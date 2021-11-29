@@ -1,0 +1,60 @@
+_BASE_: [
+  '../datasets/coco_detection.yml',
+  '../runtime.yml',
+  './_base_/base_reader.yml',
+  './_base_/optimizer_180e.yml',
+]
+
+log_iter: 100
+snapshot_epoch: 8
+weights: output/e_yolo_cd53_tood_coco_180e/model_final
+find_unused_parameters: True
+
+
+architecture: YOLOv3
+pretrain_weights: /paddle/cspdarknet53.pdparams
+norm_type: sync_bn
+use_ema: true
+ema_decay: 0.9998
+
+YOLOv3:
+  backbone: CSPDarkNet
+  neck: CustomPAN
+  yolo_head: PPTOODHead
+  post_process: ~
+
+CSPDarkNet:
+  layers: 53
+  return_idx: [2, 3, 4]
+
+CustomPAN:
+  block_per_stage: 1
+  layer_per_block: 2
+  act: 'mish'
+  block_func: 'CSPFusionBlock'
+  block_size: 3
+  keep_prob: 0.9
+  spp: true
+
+PPTOODHead:
+  fpn_strides: [32, 16, 8]
+  stacked_convs: 6
+  grid_cell_scale: 5.0
+  grid_cell_offset: 0.5
+  loss_weight: {class: 1.0, bbox: 1.0, iou: 2.0}
+  static_assigner_epoch: 4
+  static_assigner:
+    name: ATSSAssigner
+    topk: 9
+    force_gt_matching: False
+  assigner:
+    name: TaskAlignedAssigner
+    topk: 13
+    alpha: 1.0
+    beta: 6.0
+  nms:
+    name: MultiClassNMS
+    nms_top_k: 1000
+    keep_top_k: 100
+    score_threshold: 0.05
+    nms_threshold: 0.6

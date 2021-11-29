@@ -1,0 +1,83 @@
+_BASE_: [
+  '../datasets/coco_detection.yml',
+  '../runtime.yml',
+  './_base_/base_reader.yml',
+]
+
+log_iter: 100
+snapshot_epoch: 1
+weights: output/zhao_simT_coco_1x/model_final
+find_unused_parameters: True
+
+
+architecture: YOLOv3
+pretrain_weights: /paddle/ResNet50_vd_dcn_db_obj365_pretrained.pdparams
+norm_type: sync_bn
+use_ema: true
+ema_decay: 0.9998
+
+YOLOv3:
+  backbone: ResNet
+  neck: PPYOLOFPN
+  yolo_head: PPSimTHead
+  post_process: ~
+
+ResNet:
+  depth: 50
+  variant: d
+  return_idx: [ 1, 2, 3 ]
+  dcn_v2_stages: [ 3 ]
+  freeze_at: -1
+  freeze_norm: false
+  norm_decay: 0.
+  lr_mult_list: [ 0.5, 0.5, 0.5, 0.5 ]
+
+PPYOLOFPN:
+  drop_block: true
+  block_size: 3
+  keep_prob: 0.9
+  spp: true
+
+PPSimTHead:
+  fpn_strides: [32, 16, 8]
+  grid_cell_scale: 5.0
+  grid_cell_offset: 0.5
+  loss_weight: {class: 1.0, iou: 2.0}
+  static_assigner_epoch: 1000
+  use_varifocal_loss: True
+  use_align_head: True
+  static_assigner:
+    name: ATSSAssigner
+    topk: 9
+    force_gt_matching: False
+  assigner:
+    name: TaskAlignedAssigner
+    topk: 13
+    alpha: 1.0
+    beta: 6.0
+  nms:
+    name: MultiClassNMS
+    nms_top_k: 1000
+    keep_top_k: 100
+    score_threshold: 0.05
+    nms_threshold: 0.6
+
+epoch: 12
+
+LearningRate:
+  base_lr: 0.01
+  schedulers:
+  - !CosineDecay
+    max_epochs: 12
+    eta_min: 0.0005
+  - !LinearWarmup
+    start_factor: 0.001
+    steps: 500
+
+OptimizerBuilder:
+  optimizer:
+    momentum: 0.9
+    type: Momentum
+  regularizer:
+    factor: 0.0005
+    type: L2

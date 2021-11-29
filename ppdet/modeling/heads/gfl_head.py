@@ -24,6 +24,8 @@ import numpy as np
 import paddle
 import paddle.nn as nn
 import paddle.nn.functional as F
+from paddle.fluid import core
+from paddle.fluid.dygraph import parallel_helper
 from paddle import ParamAttr
 from paddle.nn.initializer import Normal, Constant
 
@@ -177,7 +179,9 @@ class GFLHead(nn.Layer):
                  feat_in_chan=256,
                  nms=None,
                  nms_pre=1000,
-                 cell_offset=0):
+                 cell_offset=0,
+                 use_yolo_neck=False,
+                 neck_feats=[256, 512, 1024]):
         super(GFLHead, self).__init__()
         self.conv_feat = conv_feat
         self.dgqp_module = dgqp_module
@@ -193,6 +197,7 @@ class GFLHead(nn.Layer):
         self.nms_pre = nms_pre
         self.cell_offset = cell_offset
         self.use_sigmoid = self.loss_qfl.use_sigmoid
+        self.use_yolo_neck = use_yolo_neck
         if self.use_sigmoid:
             self.cls_out_channels = self.num_classes
         else:
@@ -235,10 +240,20 @@ class GFLHead(nn.Layer):
 
         self.distribution_project = Integral(self.reg_max)
 
-    def forward(self, fpn_feats):
+        if self.use_yolo_neck:
+            self.conv_neck = nn.LayerList()
+            for in_channel in neck_feats:
+                self.conv_neck.append(
+                    nn.Conv2D(in_channel, self.feat_in_chan, 1))
+
+    def forward(self, fpn_feats, targets=None):
         assert len(fpn_feats) == len(
             self.fpn_stride
         ), "The size of fpn_feats is not equal to size of fpn_stride"
+        if self.use_yolo_neck:
+            fpn_feats = fpn_feats[::-1]
+            for i, feat in enumerate(fpn_feats):
+                fpn_feats[i] = self.conv_neck[i](feat)
         cls_logits_list = []
         bboxes_reg_list = []
         for scale_reg, fpn_feat in zip(self.scales_regs, fpn_feats):
@@ -253,6 +268,10 @@ class GFLHead(nn.Layer):
                 bbox_reg = bbox_reg.transpose([0, 2, 3, 1])
             cls_logits_list.append(cls_logits)
             bboxes_reg_list.append(bbox_reg)
+        if targets is not None:
+            loss = self.get_loss((cls_logits_list, bboxes_reg_list), targets)
+            loss['loss'] = paddle.add_n(list(loss.values()))
+            return loss
 
         return (cls_logits_list, bboxes_reg_list)
 
@@ -294,10 +313,11 @@ class GFLHead(nn.Layer):
         bbox_targets_list = self._images_to_levels(gt_meta['bbox_targets'],
                                                    num_level_anchors)
         num_total_pos = sum(gt_meta['pos_num'])
-        try:
-            num_total_pos = paddle.distributed.all_reduce(num_total_pos.clone(
-            )) / paddle.distributed.get_world_size()
-        except:
+        if core.is_compiled_with_dist(
+        ) and parallel_helper._is_parallel_ctx_initialized():
+            num_total_pos = paddle.distributed.all_reduce(num_total_pos) \
+                            / paddle.distributed.get_world_size()
+        else:
             num_total_pos = max(num_total_pos, 1)
 
         loss_bbox_list, loss_dfl_list, loss_qfl_list, avg_factor = [], [], [], []
@@ -353,9 +373,9 @@ class GFLHead(nn.Layer):
                     weight=weight_targets.expand([-1, 4]).reshape([-1]),
                     avg_factor=4.0)
             else:
-                loss_bbox = bbox_pred.sum() * 0
-                loss_dfl = bbox_pred.sum() * 0
-                weight_targets = paddle.to_tensor([0], dtype='float32')
+                loss_bbox = paddle.zeros([1])
+                loss_dfl = paddle.zeros([1])
+                weight_targets = paddle.zeros([1])
 
             # qfl loss
             score = paddle.to_tensor(score)

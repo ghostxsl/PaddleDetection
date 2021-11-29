@@ -23,9 +23,12 @@ import paddle.nn.functional as F
 
 from ppdet.core.workspace import register
 from ..ops import iou_similarity
+from ..bbox_utils import iou_similarity as batch_iou_similarity
 from ..bbox_utils import bbox_center
 from .utils import (pad_gt, check_points_inside_bboxes, compute_max_iou_anchor,
                     compute_max_iou_gt)
+
+__all__ = ['ATSSAssigner']
 
 
 @register
@@ -78,7 +81,8 @@ class ATSSAssigner(nn.Layer):
                 gt_labels,
                 gt_bboxes,
                 bg_index,
-                gt_scores=None):
+                gt_scores=None,
+                pred_bboxes=None):
         r"""This code is based on
             https://github.com/fcjian/TOOD/blob/master/mmdet/core/bbox/assigners/atss_assigner.py
 
@@ -104,10 +108,12 @@ class ATSSAssigner(nn.Layer):
             bg_index (int): background index
             gt_scores (Tensor|List[Tensor]|None, float32) Score of gt_bboxes,
                     shape(B, n, 1), if None, then it will initialize with one_hot label
+            pred_bboxes (Tensor, float32, optional): predicted bounding boxes, shape(B, L, 4)
         Returns:
             assigned_labels (Tensor): (B, L)
             assigned_bboxes (Tensor): (B, L, 4)
             assigned_scores (Tensor): (B, L, C)
+            assigned_ious (Tensor): (B, L, C)
         """
         gt_labels, gt_bboxes, pad_gt_scores, pad_gt_mask = pad_gt(
             gt_labels, gt_bboxes, gt_scores)
@@ -123,7 +129,9 @@ class ATSSAssigner(nn.Layer):
             assigned_bboxes = paddle.zeros([batch_size, num_anchors, 4])
             assigned_scores = paddle.zeros(
                 [batch_size, num_anchors, self.num_classes])
-            return assigned_labels, assigned_bboxes, assigned_scores
+            assigned_ious = paddle.zeros(
+                [batch_size, num_anchors, self.num_classes])
+            return assigned_labels, assigned_bboxes, assigned_scores, assigned_ious
 
         # 1. compute iou between gt and anchor bbox, [B, n, L]
         ious = iou_similarity(gt_bboxes.reshape([-1, 4]), anchor_bboxes)
@@ -198,6 +206,14 @@ class ATSSAssigner(nn.Layer):
         assigned_bboxes = assigned_bboxes.reshape([batch_size, num_anchors, 4])
 
         assigned_scores = F.one_hot(assigned_labels, self.num_classes)
+        if pred_bboxes is not None:
+            # assigned iou
+            ious = batch_iou_similarity(gt_bboxes, pred_bboxes) * mask_positive
+            ious = ious.max(axis=-2).unsqueeze(-1)
+            assigned_ious = ious * assigned_scores
+        else:
+            assigned_ious = None
+
         if gt_scores is not None:
             gather_scores = paddle.gather(
                 pad_gt_scores.flatten(), assigned_gt_index.flatten(), axis=0)
@@ -206,4 +222,4 @@ class ATSSAssigner(nn.Layer):
                                          paddle.zeros_like(gather_scores))
             assigned_scores *= gather_scores.unsqueeze(-1)
 
-        return assigned_labels, assigned_bboxes, assigned_scores
+        return assigned_labels, assigned_bboxes, assigned_scores, assigned_ious
