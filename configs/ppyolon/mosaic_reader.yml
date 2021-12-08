@@ -1,0 +1,36 @@
+worker_num: 4
+TrainReader:
+  sample_transforms:
+  - Decode: {}
+  - RandomFlip: {prob: 0.5}
+  - RandomDistort: {}
+  - PPMosaic: {target_size: 640}
+  batch_transforms:
+  - NormalizeImage: {is_scale: true, mean: [0.485,0.456,0.406], std: [0.229, 0.224,0.225]}
+  - Permute: {}
+  batch_size: 8
+  shuffle: true
+  drop_last: true
+  mosaic_epoch: 25000
+  use_shared_memory: false
+  collate_batch: false
+
+
+EvalReader:
+  sample_transforms:
+  - Decode: {}
+  - Resize: {target_size: [640, 640], keep_ratio: False}
+  - NormalizeImage: {is_scale: true, mean: [0.485,0.456,0.406], std: [0.229, 0.224,0.225]}
+  - Permute: {}
+  batch_size: 2
+
+
+TestReader:
+  inputs_def:
+    image_shape: [1, 3, 640, 640]
+  sample_transforms:
+  - Decode: {}
+  - Resize: {target_size: [640, 640], keep_ratio: False}
+  - NormalizeImage: {is_scale: true, mean: [0.485,0.456,0.406], std: [0.229, 0.224,0.225]}
+  - Permute: {}
+  batch_size: 1

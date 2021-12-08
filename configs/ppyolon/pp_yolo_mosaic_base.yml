@@ -1,0 +1,80 @@
+_BASE_: [
+  '../datasets/coco_detection.yml',
+  '../runtime.yml',
+  './mosaic_reader.yml',
+  './scheduler.yml',
+]
+
+weights: output/pp_yolo_next/model_final
+
+find_unused_parameters: True
+
+use_ema: true
+ema_decay: 0.9998
+
+log_iter: 100
+snapshot_epoch: 8
+convert_sync_bn: true
+
+
+architecture: PicoDet
+pretrain_weights: http://10.255.134.13:8091/cspdarknet53.pdparams
+
+PicoDet:
+  backbone: CSPDarkNet
+  neck: CustomPAN
+  head: PicoHead
+
+
+CSPDarkNet:
+  layers: 53
+  return_idx: [2, 3, 4]
+
+
+CustomPAN:
+  block_per_stage: 1
+  layer_per_block: 2
+  act: 'mish'
+  block_func: 'CSPFusionBlock'
+  block_size: 3
+  keep_prob: 0.9
+  spp: true
+
+
+PicoHead:
+  conv_feat:
+    name: PicoFeatX
+    feat_in: [256, 512, 1024]
+    feat_out: 256
+    num_convs: 0
+    num_fpn_stride: 3
+    norm_type: bn
+    share_cls_reg: true
+    kernel_size: 1
+
+  fpn_stride: [8, 16, 32]
+  feat_in_chan: [256, 512, 1024]
+  prior_prob: 0.01
+  reg_max: 12
+  cell_offset: 0.5
+  loss_class:
+    name: VarifocalLoss
+    use_sigmoid: True
+    iou_weighted: True
+    loss_weight: 1.0
+  loss_dfl:
+    name: DistributionFocalLoss
+    loss_weight: 0.25
+  loss_bbox:
+    name: GIoULoss
+    loss_weight: 2.0
+  assigner:
+    name: SimOTAAssigner
+    candidate_topk: 10
+    iou_weight: 6 # 5
+  nms:
+    name: MultiClassNMS
+    nms_top_k: 1000
+    keep_top_k: 100
+    score_threshold: 0.025
+    nms_threshold: 0.6
