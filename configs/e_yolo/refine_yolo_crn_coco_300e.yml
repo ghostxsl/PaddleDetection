@@ -1,18 +1,18 @@
 _BASE_: [
   '../datasets/coco_detection.yml',
   '../runtime.yml',
-  './_base_/mosaic_reader.yml',
-  './_base_/optimizer_180e.yml',
+  './_base_/base_reader.yml',
+  './_base_/optimizer_300e.yml',
 ]
 
 log_iter: 100
 snapshot_epoch: 8
-weights: output/simta_m_yolo_crn_coco_180e/model_final
+weights: output/refine_yolo_crn_coco_300e/model_final
 find_unused_parameters: True
 
 
 architecture: YOLOv3
-#pretrain_weights: http://10.255.134.13:8091/weights/cspresnetb50_silu_797.pdparams
+pretrain_weights: http://10.255.134.13:8091/weights/cspresnetb50_silu_797.pdparams
 norm_type: sync_bn
 use_ema: true
 ema_decay: 0.9998
@@ -20,7 +20,7 @@ ema_decay: 0.9998
 YOLOv3:
   backbone: CSPResNet
   neck: CustomCSPPAN
-  yolo_head: PPSimTHead
+  yolo_head: PPRefineHead
   post_process: ~
 
 CSPResNet:
@@ -38,7 +38,7 @@ CustomCSPPAN:
   keep_prob: 0.9
   spp: true
 
-PPSimTHead:
+PPRefineHead:
   fpn_strides: [32, 16, 8]
   grid_cell_scale: 5.0
   grid_cell_offset: 0.5

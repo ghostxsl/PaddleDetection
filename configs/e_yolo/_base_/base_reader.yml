@@ -11,12 +11,13 @@ TrainReader:
     - BatchRandomResize: {target_size: [320, 352, 384, 416, 448, 480, 512, 544, 576, 608, 640, 672, 704, 736, 768], random_size: True, random_interp: True, keep_ratio: False}
     - NormalizeImage: {mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225], is_scale: True}
     - Permute: {}
+    - PadGT: {}
   batch_size: 8
   shuffle: true
   drop_last: true
   #mixup_epoch: 25000
   use_shared_memory: true
-  collate_batch: false
+  collate_batch: true
 
 EvalReader:
   sample_transforms:

@@ -22,7 +22,7 @@ import paddle.nn.functional as F
 
 from ppdet.core.workspace import register
 from ..bbox_utils import iou_similarity
-from .utils import (pad_gt, gather_topk_anchors, check_points_inside_bboxes,
+from .utils import (gather_topk_anchors, check_points_inside_bboxes,
                     compute_max_iou_anchor)
 
 __all__ = ['TaskAlignedAssigner']
@@ -49,6 +49,7 @@ class TaskAlignedAssigner(nn.Layer):
                 stride_tensor,
                 gt_labels,
                 gt_bboxes,
+                pad_gt_mask,
                 bg_index,
                 gt_scores=None):
         r"""This code is based on
@@ -67,10 +68,11 @@ class TaskAlignedAssigner(nn.Layer):
             anchor_points (Tensor, float32): pre-defined anchors, shape(L, 2), "cxcy" format
             num_anchors_list (List): num of anchors in each level
             stride_tensor (Tensor, float32): stride of features, shape(L, 1)
-            gt_labels (Tensor|List[Tensor], int64): Label of gt_bboxes, shape(B, n, 1)
-            gt_bboxes (Tensor|List[Tensor], float32): Ground truth bboxes, shape(B, n, 4)
+            gt_labels (Tensor, int64|int32): Label of gt_bboxes, shape(B, n, 1)
+            gt_bboxes (Tensor, float32): Ground truth bboxes, shape(B, n, 4)
+            pad_gt_mask (Tensor, float32): 1 means bbox, 0 means no bbox, shape(B, n, 1)
             bg_index (int): background index
-            gt_scores (Tensor|List[Tensor]|None, float32) Score of gt_bboxes,
+            gt_scores (Tensor|None, float32) Score of gt_bboxes,
                     shape(B, n, 1), if None, then it will initialize with one_hot label
         Returns:
             assigned_labels (Tensor): (B, L)
@@ -78,9 +80,6 @@ class TaskAlignedAssigner(nn.Layer):
             assigned_scores (Tensor): (B, L, C)
         """
         assert pred_scores.ndim == pred_bboxes.ndim
-
-        gt_labels, gt_bboxes, pad_gt_scores, pad_gt_mask = pad_gt(
-            gt_labels, gt_bboxes, gt_scores)
         assert gt_labels.ndim == gt_bboxes.ndim and \
                gt_bboxes.ndim == 3
 
