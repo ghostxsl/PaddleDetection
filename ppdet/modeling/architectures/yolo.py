@@ -121,6 +121,12 @@ class YOLOv3(BaseArch):
 
             return output
 
+    def eval(self):
+        self.training = False
+        for layer in self.sublayers():
+            layer.training = False
+            layer.eval()
+
     def get_loss(self):
         return self._forward()
 
