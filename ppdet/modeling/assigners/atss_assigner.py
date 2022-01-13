@@ -114,8 +114,7 @@ class ATSSAssigner(nn.Layer):
         Returns:
             assigned_labels (Tensor): (B, L)
             assigned_bboxes (Tensor): (B, L, 4)
-            assigned_scores (Tensor): (B, L, C)
-            assigned_ious (Tensor): (B, L, C)
+            assigned_scores (Tensor): (B, L, C), pred_bboxes is not None, then output ious
         """
         assert gt_labels.ndim == gt_bboxes.ndim and \
                gt_bboxes.ndim == 3
@@ -129,9 +128,7 @@ class ATSSAssigner(nn.Layer):
             assigned_bboxes = paddle.zeros([batch_size, num_anchors, 4])
             assigned_scores = paddle.zeros(
                 [batch_size, num_anchors, self.num_classes])
-            assigned_ious = paddle.zeros(
-                [batch_size, num_anchors, self.num_classes])
-            return assigned_labels, assigned_bboxes, assigned_scores, assigned_ious
+            return assigned_labels, assigned_bboxes, assigned_scores
 
         # 1. compute iou between gt and anchor bbox, [B, n, L]
         ious = iou_similarity(gt_bboxes.reshape([-1, 4]), anchor_bboxes)
@@ -210,11 +207,8 @@ class ATSSAssigner(nn.Layer):
             # assigned iou
             ious = batch_iou_similarity(gt_bboxes, pred_bboxes) * mask_positive
             ious = ious.max(axis=-2).unsqueeze(-1)
-            assigned_ious = ious * assigned_scores
-        else:
-            assigned_ious = None
-
-        if gt_scores is not None:
+            assigned_scores *= ious
+        elif gt_scores is not None:
             gather_scores = paddle.gather(
                 gt_scores.flatten(), assigned_gt_index.flatten(), axis=0)
             gather_scores = gather_scores.reshape([batch_size, num_anchors])
@@ -222,4 +216,4 @@ class ATSSAssigner(nn.Layer):
                                          paddle.zeros_like(gather_scores))
             assigned_scores *= gather_scores.unsqueeze(-1)
 
-        return assigned_labels, assigned_bboxes, assigned_scores, assigned_ious
+        return assigned_labels, assigned_bboxes, assigned_scores

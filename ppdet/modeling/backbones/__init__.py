@@ -31,6 +31,8 @@ from . import hardnet
 from . import esnet
 from . import cspdarknet
 from . import cspresnet
+from . import convnext
+from . import pplcnet
 
 from .vgg import *
 from .resnet import *
@@ -51,3 +53,5 @@ from .hardnet import *
 from .esnet import *
 from .cspdarknet import *
 from .cspresnet import *
+from .convnext import *
+from .pplcnet import *
