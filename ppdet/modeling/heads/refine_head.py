@@ -454,17 +454,19 @@ class PPRefineTHead(nn.Layer):
         for i, feat in enumerate(feats):
             # task decomposition
             avg_feat = F.adaptive_avg_pool2d(feat, (1, 1))
-            cls_logit = self.simT_cls[i](self.stem_cls[i](feat, avg_feat))
-            reg_dist = self.simT_reg[i](self.stem_reg[i](feat, avg_feat))
+            cls_feat = self.stem_cls[i](feat, avg_feat)
+            cls_logit = self.simT_cls[i](cls_feat)
+            reg_feat = self.stem_reg[i](feat, avg_feat)
+            reg_dist = self.simT_reg[i](reg_feat)
             reg_dist = F.relu(reg_dist)
 
             # cls prediction and alignment
-            cls_prob = F.sigmoid(self.cls_align[i](feat))
+            cls_prob = F.sigmoid(self.cls_align[i](cls_feat))
             cls_score = (F.sigmoid(cls_logit) * cls_prob + eps).sqrt()
             cls_score_list.append(cls_score.flatten(2).transpose([0, 2, 1]))
 
             # reg prediction and alignment
-            reg_refine = self.reg_align[i](feat).exp() * reg_dist
+            reg_refine = self.reg_align[i](reg_feat).exp() * reg_dist
             reg_dist = reg_dist.flatten(2).transpose([0, 2, 1])
             reg_dist_list.append(reg_dist)
             reg_refine = reg_refine.flatten(2).transpose([0, 2, 1])
@@ -507,17 +509,19 @@ class PPRefineTHead(nn.Layer):
             l = h * w
             # task decomposition
             avg_feat = F.adaptive_avg_pool2d(feat, (1, 1))
-            cls_logit = self.simT_cls[i](self.stem_cls[i](feat, avg_feat))
-            reg_dist = self.simT_reg[i](self.stem_reg[i](feat, avg_feat))
+            cls_feat = self.stem_cls[i](feat, avg_feat)
+            cls_logit = self.simT_cls[i](cls_feat)
+            reg_feat = self.stem_reg[i](feat, avg_feat)
+            reg_dist = self.simT_reg[i](reg_feat)
             reg_dist = F.relu(reg_dist)
 
             # cls prediction and alignment
-            cls_prob = F.sigmoid(self.cls_align[i](feat))
+            cls_prob = F.sigmoid(self.cls_align[i](cls_feat))
             cls_score = (F.sigmoid(cls_logit) * cls_prob).sqrt()
             cls_score_list.append(cls_score.reshape([b, self.num_classes, l]))
 
             # reg prediction and alignment
-            reg_refine = self.reg_align[i](feat).exp() * reg_dist
+            reg_refine = self.reg_align[i](reg_feat).exp() * reg_dist
             reg_refine = reg_refine.reshape([b, 4, l])
             reg_refine_list.append(reg_refine)
 
