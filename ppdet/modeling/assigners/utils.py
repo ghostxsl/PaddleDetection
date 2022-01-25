@@ -175,7 +175,9 @@ def compute_max_iou_gt(ious):
 def generate_anchors_for_grid_cell(feats,
                                    fpn_strides,
                                    grid_cell_size=5.0,
-                                   grid_cell_offset=0.5):
+                                   grid_cell_offset=0.5,
+                                   reg_max=None,
+                                   reg_num=None):
     r"""
     Like ATSS, generate anchors based on grid size.
     Args:
@@ -194,8 +196,13 @@ def generate_anchors_for_grid_cell(feats,
     anchor_points = []
     num_anchors_list = []
     stride_tensor = []
-    for feat, stride in zip(feats, fpn_strides):
-        _, _, h, w = feat.shape
+    proj_tensor = []
+    step_tensor = []
+    if reg_max is not None:
+        assert len(fpn_strides) == len(reg_max)
+        reg_num = max(reg_max) + 1 if reg_num is None else reg_num
+    for i, stride in enumerate(fpn_strides):
+        _, _, h, w = feats[i].shape
         cell_half_size = grid_cell_size * stride * 0.5
         shift_x = (paddle.arange(end=w) + grid_cell_offset) * stride
         shift_y = (paddle.arange(end=h) + grid_cell_offset) * stride
@@ -205,20 +212,37 @@ def generate_anchors_for_grid_cell(feats,
                 shift_x - cell_half_size, shift_y - cell_half_size,
                 shift_x + cell_half_size, shift_y + cell_half_size
             ],
-            axis=-1).astype(feat.dtype)
+            axis=-1).astype(feats[i].dtype)
         anchor_point = paddle.stack(
-            [shift_x, shift_y], axis=-1).astype(feat.dtype)
+            [shift_x, shift_y], axis=-1).astype(feats[i].dtype)
 
         anchors.append(anchor.reshape([-1, 4]))
         anchor_points.append(anchor_point.reshape([-1, 2]))
         num_anchors_list.append(len(anchors[-1]))
         stride_tensor.append(
             paddle.full(
-                [num_anchors_list[-1], 1], stride, dtype=feat.dtype))
+                [num_anchors_list[-1], 1], stride, dtype=feats[i].dtype))
+        # Projection tensor[l, n, 1] and step tensor[l, 1]
+        proj_tensor.append(
+            paddle.linspace(0, reg_max[i], reg_num).reshape([1, -1, 1]).tile(
+                [num_anchors_list[-1], 1, 1]))
+        step_tensor.append(
+            paddle.full(
+                [num_anchors_list[-1]],
+                reg_max[i] / (reg_num - 1),
+                dtype=feats[i].dtype))
     anchors = paddle.concat(anchors)
     anchors.stop_gradient = True
     anchor_points = paddle.concat(anchor_points)
     anchor_points.stop_gradient = True
     stride_tensor = paddle.concat(stride_tensor)
     stride_tensor.stop_gradient = True
-    return anchors, anchor_points, num_anchors_list, stride_tensor
+    proj_tensor = paddle.concat(proj_tensor)
+    proj_tensor.stop_gradient = True
+    step_tensor = paddle.concat(step_tensor)
+    step_tensor.stop_gradient = True
+
+    if reg_max is None:
+        return anchors, anchor_points, num_anchors_list, stride_tensor
+    else:
+        return anchors, anchor_points, num_anchors_list, stride_tensor, proj_tensor, step_tensor
