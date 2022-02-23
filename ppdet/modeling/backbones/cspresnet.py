@@ -227,16 +227,35 @@ class CSPResNet(nn.Layer):
                  act='swish',
                  return_idx=[0, 1, 2, 3, 4],
                  depth_wise=False,
+                 use_large_stem=False,
                  width_mult=1.0,
                  depth_mult=1.0):
         super(CSPResNet, self).__init__()
 
         channels = [max(round(c * width_mult), 1) for c in channels]
         layers = [max(round(l * depth_mult), 1) for l in layers]
-        self.stem = nn.Sequential(
-            ('conv1', ConvBNLayer(
-                3, channels[0] // 2, 3, stride=2, padding=1,
-                act=act)), ('conv2', ConvBNLayer(
+        if use_large_stem:
+            self.stem = nn.Sequential(
+                ('conv1', ConvBNLayer(
+                    3, channels[0] // 2, 3, stride=2, padding=1, act=act)),
+                ('conv2', ConvBNLayer(
+                    channels[0] // 2,
+                    channels[0] // 2,
+                    3,
+                    stride=1,
+                    padding=1,
+                    act=act)), ('conv3', ConvBNLayer(
+                        channels[0] // 2,
+                        channels[0],
+                        3,
+                        stride=1,
+                        padding=1,
+                        act=act)))
+        else:
+            self.stem = nn.Sequential(
+                ('conv1', ConvBNLayer(
+                    3, channels[0] // 2, 3, stride=2, padding=1, act=act)),
+                ('conv2', ConvBNLayer(
                     channels[0] // 2,
                     channels[0],
                     3,

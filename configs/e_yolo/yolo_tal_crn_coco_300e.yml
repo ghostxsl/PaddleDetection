@@ -2,12 +2,12 @@ _BASE_: [
   '../datasets/coco_detection.yml',
   '../runtime.yml',
   './_base_/base_reader.yml',
-  './_base_/optimizer_3x.yml',
+  './_base_/optimizer_300e.yml',
 ]
 
 log_iter: 100
-snapshot_epoch: 2
-weights: output/yolo_tal_crn_coco_3x/model_final
+snapshot_epoch: 8
+weights: output/yolo_tal_crn_coco_300e/model_final
 find_unused_parameters: True
 
 
@@ -40,12 +40,13 @@ PPYOLOHead:
   fpn_strides: [32, 16, 8]
   grid_cell_scale: 5.0
   grid_cell_offset: 0.5
-  static_assigner_epoch: 4
+  static_assigner_epoch: 100
   use_varifocal_loss: False
   loss_weight: {class: 1.0, iou: 2.0}
   static_assigner:
     name: ATSSAssigner
     topk: 9
+    force_gt_matching: False
   assigner:
     name: TaskAlignedAssigner
     topk: 13

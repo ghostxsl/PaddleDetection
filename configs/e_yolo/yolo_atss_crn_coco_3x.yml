@@ -7,7 +7,7 @@ _BASE_: [
 
 log_iter: 100
 snapshot_epoch: 2
-weights: output/yolo_tal_crn_coco_3x/model_final
+weights: output/yolo_atss_crn_coco_3x/model_final
 find_unused_parameters: True
 
 
@@ -40,7 +40,7 @@ PPYOLOHead:
   fpn_strides: [32, 16, 8]
   grid_cell_scale: 5.0
   grid_cell_offset: 0.5
-  static_assigner_epoch: 4
+  static_assigner_epoch: 400
   use_varifocal_loss: False
   loss_weight: {class: 1.0, iou: 2.0}
   static_assigner:
