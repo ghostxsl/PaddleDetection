@@ -7,3 +7,15 @@ pretrain_weights: http://10.21.226.169:8090/2d/pretrain/cspresnetb_s_710.pdparam
 
 depth_mult: 0.33
 width_mult: 0.50
+
+TrainReader:
+  batch_size: 32
+
+LearningRate:
+  base_lr: 0.04
+  schedulers:
+    - !CosineDecay
+      max_epochs: 360
+    - !LinearWarmup
+      start_factor: 0.001
+      steps: 2300
