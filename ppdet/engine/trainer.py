@@ -353,6 +353,11 @@ class Trainer(object):
     def train(self, validate=False):
         assert self.mode == 'train', "Model not in 'train' mode"
         Init_mark = False
+        params = sum([
+            p.numel() for n, p in self.model.named_parameters()
+            if all([x not in n for x in ['_mean', '_variance']])
+        ])  # exclude BatchNorm running status
+        print('params: ', params)
 
         sync_bn = (getattr(self.cfg, 'norm_type', None) == 'sync_bn' and
                    self.cfg.use_gpu and self._nranks > 1)
@@ -490,6 +495,14 @@ class Trainer(object):
         self._compose_callback.on_train_end(self.status)
 
     def _eval_with_loader(self, loader):
+        for layer in self.model.sublayers():
+            if hasattr(layer, 'convert_to_deploy'):
+                layer.convert_to_deploy()
+        params = sum([
+            p.numel() for n, p in self.model.named_parameters()
+            if all([x not in n for x in ['_mean', '_variance']])
+        ])  # exclude BatchNorm running status
+        print('params: ', params)
         sample_num = 0
         tic = time.time()
         self._compose_callback.on_epoch_begin(self.status)
@@ -651,6 +664,12 @@ class Trainer(object):
             if hasattr(layer, 'convert_to_deploy'):
                 layer.convert_to_deploy()
 
+        params = sum([
+            p.numel() for n, p in self.model.named_parameters()
+            if all([x not in n for x in ['_mean', '_variance']])
+        ])  # exclude BatchNorm running status
+        print('params: ', params)
+
         export_post_process = self.cfg.get('export_post_process', False)
         if hasattr(self.model, 'export_post_process'):
             self.model.export_post_process = export_post_process
@@ -789,5 +808,6 @@ class Trainer(object):
             images.sort()
             assert len(images) > 0, "no image found in {}".format(infer_dir)
             all_images.extend(images)
-            logger.info("Found {} inference images in total.".format(len(images)))
+            logger.info("Found {} inference images in total.".format(
+                len(images)))
         return all_images

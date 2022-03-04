@@ -758,7 +758,7 @@ def main():
         if FLAGS.image_dir is None and FLAGS.image_file is not None:
             assert FLAGS.batch_size == 1, "batch_size should be 1, when image_file is not None"
         img_list = get_test_images(FLAGS.image_dir, FLAGS.image_file)
-        detector.predict_image(img_list, FLAGS.run_benchmark, repeats=10)
+        detector.predict_image(img_list, FLAGS.run_benchmark, repeats=100)
         if not FLAGS.run_benchmark:
             detector.det_times.info(average=True)
         else:

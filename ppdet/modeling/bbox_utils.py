@@ -187,15 +187,17 @@ def batch_bbox_overlaps(bboxes1,
         else:
             return paddle.full(batch_shape + (rows, cols), 1)
 
-    area1 = (bboxes1[:, 2] - bboxes1[:, 0]) * (bboxes1[:, 3] - bboxes1[:, 1])
-    area2 = (bboxes2[:, 2] - bboxes2[:, 0]) * (bboxes2[:, 3] - bboxes2[:, 1])
+    area1 = (bboxes1[..., 2] - bboxes1[..., 0]) * (
+        bboxes1[..., 3] - bboxes1[..., 1])
+    area2 = (bboxes2[..., 2] - bboxes2[..., 0]) * (
+        bboxes2[..., 3] - bboxes2[..., 1])
 
     if is_aligned:
-        lt = paddle.maximum(bboxes1[:, :2], bboxes2[:, :2])  # [B, rows, 2]
-        rb = paddle.minimum(bboxes1[:, 2:], bboxes2[:, 2:])  # [B, rows, 2]
+        lt = paddle.maximum(bboxes1[..., :2], bboxes2[..., :2])  # [B, rows, 2]
+        rb = paddle.minimum(bboxes1[..., 2:], bboxes2[..., 2:])  # [B, rows, 2]
 
         wh = (rb - lt).clip(min=0)  # [B, rows, 2]
-        overlap = wh[:, 0] * wh[:, 1]
+        overlap = wh[..., 0] * wh[..., 1]
 
         if mode in ['iou', 'giou']:
             union = area1 + area2 - overlap

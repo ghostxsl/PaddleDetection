@@ -322,6 +322,7 @@ class PPYOLOEHead(nn.Layer):
                 pred_bboxes.detach() * stride_tensor,
                 anchor_points,
                 num_anchors_list,
+                stride_tensor,
                 gt_labels,
                 gt_bboxes,
                 pad_gt_mask,
