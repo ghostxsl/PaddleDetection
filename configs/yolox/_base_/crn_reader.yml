@@ -1,0 +1,30 @@
+worker_num: 4
+TrainReader:
+  sample_transforms:
+    - Decode: {}
+    - AugImage: {target_size: 640, hsv_prob: 1.0, flip_prob: 0.5}
+  batch_transforms:
+    - Permute: {}
+  batch_size: 8
+  shuffle: True
+  drop_last: True
+  collate_batch: False
+  use_shared_memory: true
+
+EvalReader:
+  sample_transforms:
+    - Decode: {}
+    - Resize: { target_size: 640, keep_ratio: True }
+    - Pad: { size: 640, fill_value: [ 114., 114., 114. ] }
+    - Permute: {}
+  batch_size: 2
+
+TestReader:
+  inputs_def:
+    image_shape: [3, 640, 640]
+  sample_transforms:
+    - Decode: {}
+    - Resize: { target_size: 640, keep_ratio: True }
+    - Pad: { size: 640, fill_value: [ 114., 114., 114. ] }
+    - Permute: {}
+  batch_size: 1

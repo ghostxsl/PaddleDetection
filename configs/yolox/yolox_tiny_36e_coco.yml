@@ -1,0 +1,48 @@
+_BASE_: [
+  '../datasets/coco_detection.yml',
+  '../runtime.yml',
+  './_base_/optimizer_36e.yml',
+  './_base_/yolox_tiny_reader.yml'
+]
+
+log_iter: 100
+snapshot_epoch: 2
+weights: output/yolox_tiny_36e_coco/model_final
+find_unused_parameters: True
+
+architecture: YOLOX
+use_ema: True
+ema_decay: 0.9998
+ema_decay_type: "exponential"
+depth_mult: 0.33
+width_mult: 0.375
+
+YOLOX:
+  backbone: CSPDarkNet
+  neck: YOLOCSPPAN
+  head: YOLOXHead
+  size_range: [10, 20]
+
+CSPDarkNet:
+  arch: "X"
+  return_idx: [2, 3, 4]
+
+YOLOCSPPAN:
+  depthwise: False
+
+YOLOXHead:
+  l1_epoch: 34
+  loss_weight: {class: 1.0, obj: 1.0, iou: 5.0, l1: 1.0}
+  assigner:
+    name: SimOTAAssigner
+    candidate_topk: 10
+    use_vfl: False
+  nms:
+    name: MultiClassNMS
+    nms_top_k: 1000
+    keep_top_k: 100
+    score_threshold: 0.001
+    nms_threshold: 0.65
+
+TrainReader:
+  mosaic_epoch: 34
