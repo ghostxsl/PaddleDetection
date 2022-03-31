@@ -72,6 +72,7 @@ class Trainer(object):
         self.amp_level = self.cfg.get('amp_level', 'O1')
         self.custom_white_list = self.cfg.get('custom_white_list', None)
         self.custom_black_list = self.cfg.get('custom_black_list', None)
+        self.dist_eval = self.cfg.get('dist_eval', False)
         if 'slim' in cfg and cfg['slim_type'] == 'PTQ':
             self.cfg['TestDataset'] = create('TestDataset')()
 
@@ -145,7 +146,8 @@ class Trainer(object):
                 self.loader = create(reader_name)(self.dataset, cfg.worker_num)
             else:
                 self._eval_batch_sampler = paddle.io.BatchSampler(
-                    self.dataset, batch_size=self.cfg.EvalReader['batch_size'])
+                    self.dataset, batch_size=self.cfg.EvalReader[
+                        'batch_size']) if not self.dist_eval else None
                 reader_name = '{}Reader'.format(self.mode.capitalize())
                 # If metric is VOC, need to be set collate_batch=False.
                 if cfg.metric == 'VOC':
@@ -290,8 +292,7 @@ class Trainer(object):
         elif self.cfg.metric == 'RBOX':
             # TODO: bias should be unified
             bias = self.cfg['bias'] if 'bias' in self.cfg else 0
-            output_eval = self.cfg['output_eval'] \
-                if 'output_eval' in self.cfg else None
+            output_eval = self.cfg.get('output_eval', None)
             save_prediction_only = self.cfg.get('save_prediction_only', False)
             imid2path = self.cfg.get('imid2path', None)
 
@@ -577,7 +578,8 @@ class Trainer(object):
                     self._eval_batch_sampler = \
                         paddle.io.BatchSampler(
                             self._eval_dataset,
-                            batch_size=self.cfg.EvalReader['batch_size'])
+                            batch_size=self.cfg.EvalReader['batch_size'])\
+                            if not self.dist_eval else None
                     # If metric is VOC, need to be set collate_batch=False.
                     if self.cfg.metric == 'VOC':
                         self.cfg['EvalReader']['collate_batch'] = False
@@ -608,16 +610,21 @@ class Trainer(object):
         self._compose_callback.on_train_end(self.status)
 
     def _eval_with_loader(self, loader):
-        sample_num = 0
-        tic = time.time()
-        self._compose_callback.on_epoch_begin(self.status)
         self.status['mode'] = 'eval'
 
         self.model.eval()
+        self.status['sample_num'] = len(self.cfg.EvalDataset)
         if self.cfg.get('print_flops', False):
             flops_loader = create('{}Reader'.format(self.mode.capitalize()))(
                 self.dataset, self.cfg.worker_num, self._eval_batch_sampler)
             self._flops(flops_loader)
+
+        model = self.model
+        if self.dist_eval:
+            model = paddle.DataParallel(model)
+
+        tic = time.time()
+        self._compose_callback.on_epoch_begin(self.status)
         for step_id, data in enumerate(loader):
             self.status['step_id'] = step_id
             self._compose_callback.on_step_begin(self.status)
@@ -629,42 +636,38 @@ class Trainer(object):
                         custom_white_list=self.custom_white_list,
                         custom_black_list=self.custom_black_list,
                         level=self.amp_level):
-                    outs = self.model(data)
+                    outs = model(data)
             else:
-                outs = self.model(data)
+                outs = model(data)
 
-            # update metrics
-            for metric in self._metrics:
-                metric.update(data, outs)
-
-            # multi-scale inputs: all inputs have same im_id
-            if isinstance(data, typing.Sequence):
-                sample_num += data[0]['im_id'].numpy().shape[0]
-            else:
-                sample_num += data['im_id'].numpy().shape[0]
+            if self.dist_eval:
+                if isinstance(data, typing.Sequence):
+                    data = data[0]
+                data['im_id'] = self._dist_all_gather(data['im_id'])
+                outs = {k: self._dist_all_gather(v) for k, v in outs.items()}
+                if step_id + 1 == len(loader) and self._local_rank == 0:
+                    num_tail = self.status['sample_num'] - (
+                        len(loader) - 1) * loader.batch_size * self._nranks
+                    data['im_id'] = data['im_id'][:num_tail]
+                    outs['bbox_num'] = outs['bbox_num'][:num_tail]
+                    outs['bbox'] = outs['bbox'][:outs['bbox_num'].sum()]
+            if self._nranks < 2 or self._local_rank == 0:
+                # update metrics
+                for metric in self._metrics:
+                    metric.update(data, outs)
             self._compose_callback.on_step_end(self.status)
-
-        self.status['sample_num'] = sample_num
         self.status['cost_time'] = time.time() - tic
 
-        # accumulate metric to log out
-        for metric in self._metrics:
-            metric.accumulate()
-            metric.log()
+        if self._nranks < 2 or self._local_rank == 0:
+            # accumulate metric to log out
+            for metric in self._metrics:
+                metric.accumulate()
+                metric.log()
         self._compose_callback.on_epoch_end(self.status)
         # reset metric states for metric may performed multiple times
         self._reset_metrics()
 
     def evaluate(self):
-        # get distributed model
-        if self.cfg.get('fleet', False):
-            self.model = fleet.distributed_model(self.model)
-            self.optimizer = fleet.distributed_optimizer(self.optimizer)
-        elif self._nranks > 1:
-            find_unused_parameters = self.cfg[
-                'find_unused_parameters'] if 'find_unused_parameters' in self.cfg else False
-            self.model = paddle.DataParallel(
-                self.model, find_unused_parameters=find_unused_parameters)
         with paddle.no_grad():
             self._eval_with_loader(self.loader)
 
@@ -1261,3 +1264,30 @@ class Trainer(object):
             logger.info("Found {} inference images in total.".format(
                 len(images)))
         return all_images
+
+    def _dist_all_gather(self, tensor):
+        if self._nranks < 2:
+            return tensor
+        tensor = paddle.to_tensor(
+            tensor, place=paddle.CUDAPlace(self._local_rank))
+        tensor, size_list = self._pad_all_gather_tensor(tensor)
+        tensor_list = []
+        dist.all_gather(tensor_list, tensor)
+        tensor_list = [a[:b] for a, b in zip(tensor_list, size_list)]
+        return paddle.concat(tensor_list)
+
+    def _pad_all_gather_tensor(self, tensor):
+        # pad the tensor because paddle.distributed.all_gather does not support
+        # gather tensors of different shapes
+        local_size = tensor.shape[0]
+        size_list = []
+        dist.all_gather(size_list, paddle.to_tensor(local_size))
+        size_list = [a.item() for a in size_list]
+        max_size = max(size_list)
+        pad_shape = tensor.shape
+        pad_shape[0] = max_size - pad_shape[0]
+        if local_size < max_size:
+            tensor = paddle.concat(
+                [tensor, paddle.zeros(
+                    pad_shape, dtype=tensor.dtype)])
+        return tensor, size_list
