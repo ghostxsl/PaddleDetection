@@ -346,8 +346,8 @@ class YOLOXHead(nn.Layer):
                 pred_cls_pos, assigned_cls_pos, reduction='sum')
             loss_cls /= num_pos
         else:
-            loss_cls = paddle.zeros([1])
-            loss_iou = paddle.zeros([1])
+            loss_cls = pred_cls.sum() * 0.
+            loss_iou = pred_bboxes.sum() * 0.
             loss_l1 = paddle.zeros([1])
 
         loss_obj /= num_pos
