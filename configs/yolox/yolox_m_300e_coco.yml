@@ -2,34 +2,31 @@ _BASE_: [
   '../datasets/coco_detection.yml',
   '../runtime.yml',
   './_base_/optimizer_300e.yml',
-  './_base_/crn_reader.yml'
+  './_base_/yolox_reader.yml'
 ]
 
 log_iter: 100
 snapshot_epoch: 10
-weights: output/yolox_crn_s_300e_coco/model_final
+weights: output/yolox_m_300e_coco/model_final
 find_unused_parameters: True
-pretrain_weights: https://paddledet.bj.bcebos.com/models/pretrained/CSPResNetb_s_pretrained.pdparams
 
 architecture: YOLOX
 norm_type: sync_bn
 use_ema: True
-ema_decay: 0.9998
+ema_decay: 0.9999
 ema_decay_type: "exponential"
-depth_mult: 0.33
-width_mult: 0.50
+depth_mult: 0.67
+width_mult: 0.75
 
 YOLOX:
-  backbone: CSPResNet
+  backbone: CSPDarkNet
   neck: YOLOCSPPAN
   head: YOLOXHead
   size_range: [15, 25]
 
-CSPResNet:
-  layers: [3, 6, 6, 3]
-  channels: [64, 128, 256, 512, 1024]
-  return_idx: [1, 2, 3]
-  use_large_stem: True
+CSPDarkNet:
+  arch: "X"
+  return_idx: [2, 3, 4]
 
 YOLOCSPPAN:
   depthwise: False

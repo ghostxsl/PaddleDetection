@@ -6,11 +6,12 @@ _BASE_: [
 ]
 
 log_iter: 100
-snapshot_epoch: 5
+snapshot_epoch: 10
 weights: output/yolox_s_300e_coco/model_final
 find_unused_parameters: True
 
 architecture: YOLOX
+norm_type: sync_bn
 use_ema: True
 ema_decay: 0.9998
 ema_decay_type: "exponential"
