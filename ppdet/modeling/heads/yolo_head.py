@@ -314,6 +314,7 @@ class YOLOXHead(nn.Layer):
         # pos/neg loss
         if num_pos > 0:
             num_pos = paddle.to_tensor(num_pos, dtype=self._dtype).clip(min=1)
+            loss_obj /= num_pos
             # l1 + iou
             bbox_mask = mask_positive.unsqueeze(-1).tile([1, 1, 4])
             pred_bboxes_pos = paddle.masked_select(pred_bboxes,
@@ -350,7 +351,6 @@ class YOLOXHead(nn.Layer):
             loss_iou = pred_bboxes.sum() * 0.
             loss_l1 = paddle.zeros([1])
 
-        loss_obj /= num_pos
         loss = self.loss_weight['obj'] * loss_obj + \
                self.loss_weight['class'] * loss_cls + \
                self.loss_weight['iou'] * loss_iou
