@@ -139,6 +139,7 @@ class BaseDataLoader(object):
                  num_classes=80,
                  collate_batch=True,
                  use_shared_memory=False,
+                 persistent_workers=False,
                  **kwargs):
         # sample transform
         self._sample_transforms = Compose(
@@ -151,6 +152,7 @@ class BaseDataLoader(object):
         self.shuffle = shuffle
         self.drop_last = drop_last
         self.use_shared_memory = use_shared_memory
+        self.persistent_workers = persistent_workers
         self.kwargs = kwargs
 
     def __call__(self,
@@ -193,8 +195,9 @@ class BaseDataLoader(object):
             collate_fn=self._batch_transforms,
             num_workers=worker_num,
             return_list=return_list,
-            use_shared_memory=use_shared_memory)
-        self.loader = iter(self.dataloader)
+            use_shared_memory=use_shared_memory,
+            persistent_workers=self.persistent_workers)
+        self.loader = None
 
         return self
 
@@ -205,10 +208,12 @@ class BaseDataLoader(object):
         return self
 
     def __next__(self):
+        if self.loader is None:
+            self.loader = iter(self.dataloader)
         try:
             return next(self.loader)
         except StopIteration:
-            self.loader = iter(self.dataloader)
+            self.loader = None
             six.reraise(*sys.exc_info())
 
     def next(self):
@@ -243,7 +248,7 @@ class EvalReader(BaseDataLoader):
                  batch_transforms=[],
                  batch_size=1,
                  shuffle=False,
-                 drop_last=True,
+                 drop_last=False,
                  num_classes=80,
                  **kwargs):
         super(EvalReader, self).__init__(sample_transforms, batch_transforms,

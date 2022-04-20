@@ -74,7 +74,8 @@ class TrainingStats(object):
                 for k in stats.keys()
             }
         for k, v in self.meters.items():
-            v.update(stats[k].numpy())
+            if k in stats:
+                v.update(stats[k].numpy())
 
     def get(self, extras=None):
         stats = collections.OrderedDict()

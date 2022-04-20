@@ -1,4 +1,4 @@
-# Copyright (c) 2019 PaddlePaddle Authors. All Rights Reserved.
+# Copyright (c) 2022 PaddlePaddle Authors. All Rights Reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,21 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from . import coco
-from . import voc
-from . import widerface
-from . import category
-from . import keypoint_coco
-from . import mot
-from . import sniper_coco
-from . import miaod_voc
+from . import trainer
+from . import callbacks
+from . import utils
+from . import checkpoint
 
-from .coco import *
-from .voc import *
-from .widerface import *
-from .category import *
-from .keypoint_coco import *
-from .mot import *
-from .sniper_coco import SniperCOCODataSet
-from .dataset import ImageFolder
-from .miaod_voc import *
+from .trainer import *
+from .callbacks import *
+from .utils import *
+from .checkpoint import *

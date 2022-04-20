@@ -178,7 +178,7 @@ class ImageFolder(DetDataset):
                 images.extend(_make_dataset(im_dir))
             elif os.path.isfile(im_dir) and _is_valid_file(im_dir):
                 images.append(im_dir)
-        return images
+        return sorted(images)
 
     def _load_images(self):
         images = self._parse()

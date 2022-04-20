@@ -1,0 +1,13 @@
+_BASE_: [
+  '../../datasets/miaod_voc.yml',
+  '../../runtime.yml',
+  '_base_/gfl_r50_fpn.yml',
+  '_base_/optimizer_1x.yml',
+  '_base_/gfl_reader.yml',
+]
+
+weights: output/gfl_r50_fpn_1x_coco/model_final
+find_unused_parameters: True
+
+initial_sample_ratio: 0.05
+delta_sample_ratio: 0.025

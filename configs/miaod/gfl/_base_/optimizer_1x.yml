@@ -1,0 +1,19 @@
+cycle: 7
+round: 2
+stage_ratio: [6, 2, 2]
+
+LearningRate:
+  base_lr: 0.001
+  schedulers:
+  - !PiecewiseDecay
+    gamma: 0.1
+    milestones: [4]
+    use_warmup: False
+
+OptimizerBuilder:
+  optimizer:
+    momentum: 0.9
+    type: Momentum
+  regularizer:
+    factor: 0.0001
+    type: L2
