@@ -3352,7 +3352,7 @@ class PadResize(BaseOperator):
         self.target_size = target_size
         self.fill_value = fill_value
 
-    def _resize(self, img, bboxes, labels):
+    def _resize(self, img, bboxes, labels, is_crowd):
         ratio = min(self.target_size[0] / img.shape[0],
                     self.target_size[1] / img.shape[1])
         w, h = int(img.shape[1] * ratio), int(img.shape[0] * ratio)
@@ -3364,7 +3364,8 @@ class PadResize(BaseOperator):
                               bboxes[:, 3] - bboxes[:, 1]) > 1
             bboxes = bboxes[mask]
             labels = labels[mask]
-        return resized_img, bboxes, labels
+            is_crowd = is_crowd[mask]
+        return resized_img, bboxes, labels, is_crowd
 
     def _pad(self, img):
         h, w, _ = img.shape
@@ -3381,8 +3382,13 @@ class PadResize(BaseOperator):
         image = sample['image']
         bboxes = sample['gt_bbox']
         labels = sample['gt_class']
-        image, bboxes, labels = self._resize(image, bboxes, labels)
+        is_crowd = sample.get('is_crowd',
+                              np.zeros(
+                                  (len(bboxes), 1), dtype=np.int32))
+        image, bboxes, labels, is_crowd = self._resize(image, bboxes, labels,
+                                                       is_crowd)
         sample['image'] = self._pad(image).astype(np.float32)
         sample['gt_bbox'] = bboxes
         sample['gt_class'] = labels
+        sample['is_crowd'] = is_crowd
         return sample

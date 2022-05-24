@@ -41,7 +41,7 @@ class ATSSAssigner(nn.Layer):
                  topk=9,
                  num_classes=80,
                  force_gt_matching=False,
-                 eps=1e-9):
+                 eps=1e-5):
         super(ATSSAssigner, self).__init__()
         self.topk = topk
         self.num_classes = num_classes

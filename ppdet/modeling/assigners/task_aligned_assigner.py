@@ -33,7 +33,7 @@ class TaskAlignedAssigner(nn.Layer):
     """TOOD: Task-aligned One-stage Object Detection
     """
 
-    def __init__(self, topk=13, alpha=1.0, beta=6.0, eps=1e-9):
+    def __init__(self, topk=13, alpha=1.0, beta=6.0, eps=1e-5):
         super(TaskAlignedAssigner, self).__init__()
         self.topk = topk
         self.alpha = alpha

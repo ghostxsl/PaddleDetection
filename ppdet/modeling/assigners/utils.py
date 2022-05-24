@@ -80,7 +80,7 @@ def pad_gt(gt_labels, gt_bboxes, gt_scores=None):
         raise ValueError('The input `gt_labels` or `gt_bboxes` is invalid! ')
 
 
-def gather_topk_anchors(metrics, topk, largest=True, topk_mask=None, eps=1e-9):
+def gather_topk_anchors(metrics, topk, largest=True, topk_mask=None, eps=1e-5):
     r"""
     Args:
         metrics (Tensor, float32): shape[B, n, L], n: num_gts, L: num_anchors
@@ -90,7 +90,7 @@ def gather_topk_anchors(metrics, topk, largest=True, topk_mask=None, eps=1e-9):
             ascending order. Default: True
         topk_mask (Tensor, float32): shape[B, n, 1], ignore bbox mask,
             Default: None
-        eps (float): Default: 1e-9
+        eps (float): Default: 1e-5
     Returns:
         is_in_topk (Tensor, float32): shape[B, n, L], value=1. means selected
     """
@@ -108,13 +108,13 @@ def gather_topk_anchors(metrics, topk, largest=True, topk_mask=None, eps=1e-9):
 def check_points_inside_bboxes(points,
                                bboxes,
                                center_radius_tensor=None,
-                               eps=1e-9):
+                               eps=1e-5):
     r"""
     Args:
         points (Tensor, float32): shape[L, 2], "xy" format, L: num_anchors
         bboxes (Tensor, float32): shape[B, n, 4], "xmin, ymin, xmax, ymax" format
         center_radius_tensor (Tensor, float32): shape [L, 1]. Default: None.
-        eps (float): Default: 1e-9
+        eps (float): Default: 1e-5
     Returns:
         is_in_bboxes (Tensor, float32): shape[B, n, L], value=1. means selected
     """
