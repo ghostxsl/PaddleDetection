@@ -80,7 +80,7 @@ def pad_gt(gt_labels, gt_bboxes, gt_scores=None):
         raise ValueError('The input `gt_labels` or `gt_bboxes` is invalid! ')
 
 
-def gather_topk_anchors(metrics, topk, largest=True, topk_mask=None, eps=1e-9):
+def gather_topk_anchors(metrics, topk, largest=True, topk_mask=None, eps=1e-5):
     r"""
     Args:
         metrics (Tensor, float32): shape[B, n, L], n: num_gts, L: num_anchors
@@ -108,7 +108,7 @@ def gather_topk_anchors(metrics, topk, largest=True, topk_mask=None, eps=1e-9):
 def check_points_inside_bboxes(points,
                                bboxes,
                                center_radius_tensor=None,
-                               eps=1e-9):
+                               eps=1e-5):
     r"""
     Args:
         points (Tensor, float32): shape[L, 2], "xy" format, L: num_anchors
@@ -127,7 +127,7 @@ def check_points_inside_bboxes(points,
     r = xmax - x
     b = ymax - y
     delta_ltrb = paddle.concat([l, t, r, b], axis=-1)
-    is_in_bboxes = (delta_ltrb.min(axis=-1) > eps)
+    is_in_bboxes = (delta_ltrb.min(axis=-1) > eps).astype(bboxes.dtype)
     if center_radius_tensor is not None:
         # check whether `points` is in `center_radius`
         center_radius_tensor = center_radius_tensor.unsqueeze([0, 1])
@@ -138,11 +138,10 @@ def check_points_inside_bboxes(points,
         r = (cx + center_radius_tensor) - x
         b = (cy + center_radius_tensor) - y
         delta_ltrb_c = paddle.concat([l, t, r, b], axis=-1)
-        is_in_center = (delta_ltrb_c.min(axis=-1) > eps)
-        return (paddle.logical_and(is_in_bboxes, is_in_center),
-                paddle.logical_or(is_in_bboxes, is_in_center))
+        is_in_center = (delta_ltrb_c.min(axis=-1) > eps).astype(bboxes.dtype)
+        return is_in_bboxes, is_in_center
 
-    return is_in_bboxes.astype(bboxes.dtype)
+    return is_in_bboxes
 
 
 def compute_max_iou_anchor(ious):
