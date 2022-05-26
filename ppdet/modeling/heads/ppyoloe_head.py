@@ -56,7 +56,7 @@ class PPYOLOEHead(nn.Layer):
                  fpn_strides=(32, 16, 8),
                  grid_cell_scale=5.0,
                  grid_cell_offset=0.5,
-                 reg_max=16,
+                 reg_range=(-2, 16),
                  static_assigner_epoch=4,
                  use_varifocal_loss=True,
                  static_assigner='ATSSAssigner',
@@ -77,7 +77,8 @@ class PPYOLOEHead(nn.Layer):
         self.fpn_strides = fpn_strides
         self.grid_cell_scale = grid_cell_scale
         self.grid_cell_offset = grid_cell_offset
-        self.reg_max = reg_max
+        self.reg_range = reg_range
+        self.reg_channels = reg_range[1] - reg_range[0]
         self.iou_loss = GIoULoss()
         self.loss_weight = loss_weight
         self.use_varifocal_loss = use_varifocal_loss
@@ -108,9 +109,9 @@ class PPYOLOEHead(nn.Layer):
                     in_c, self.num_classes, 3, padding=1))
             self.pred_reg.append(
                 nn.Conv2D(
-                    in_c, 4 * (self.reg_max + 1), 3, padding=1))
+                    in_c, 4 * self.reg_channels, 3, padding=1))
         # projection conv
-        self.proj_conv = nn.Conv2D(self.reg_max + 1, 1, 1, bias_attr=False)
+        self.proj_conv = nn.Conv2D(self.reg_channels, 1, 1, bias_attr=False)
         self.proj_conv.skip_quant = True
         self._init_weights()
 
@@ -126,9 +127,10 @@ class PPYOLOEHead(nn.Layer):
             constant_(reg_.weight)
             constant_(reg_.bias, 1.0)
 
-        self.proj = paddle.linspace(0, self.reg_max, self.reg_max + 1)
+        self.proj = paddle.linspace(self.reg_range[0], self.reg_range[1] - 1,
+                                    self.reg_channels)
         self.proj_conv.weight.set_value(
-            self.proj.reshape([1, self.reg_max + 1, 1, 1]))
+            self.proj.reshape([1, self.reg_channels, 1, 1]))
         self.proj_conv.weight.stop_gradient = True
 
         if self.eval_size:
@@ -197,8 +199,8 @@ class PPYOLOEHead(nn.Layer):
             cls_logit = self.pred_cls[i](self.stem_cls[i](feat, avg_feat) +
                                          feat)
             reg_dist = self.pred_reg[i](self.stem_reg[i](feat, avg_feat))
-            reg_dist = reg_dist.reshape([-1, 4, self.reg_max + 1, l]).transpose(
-                [0, 2, 1, 3])
+            reg_dist = reg_dist.reshape(
+                [-1, 4, self.reg_channels, l]).transpose([0, 2, 1, 3])
             reg_dist = self.proj_conv(F.softmax(reg_dist, axis=1))
             # cls and reg
             cls_score = F.sigmoid(cls_logit)
@@ -238,25 +240,28 @@ class PPYOLOEHead(nn.Layer):
 
     def _bbox_decode(self, anchor_points, pred_dist):
         b, l, _ = get_static_shape(pred_dist)
-        pred_dist = F.softmax(pred_dist.reshape([b, l, 4, self.reg_max + 1
+        pred_dist = F.softmax(pred_dist.reshape([b, l, 4, self.reg_channels
                                                  ])).matmul(self.proj)
         return batch_distance2bbox(anchor_points, pred_dist)
 
-    def _bbox2distance(self, points, bbox):
+    def _bbox2distance(self, points, bbox, eps=1e-2):
         x1y1, x2y2 = paddle.split(bbox, 2, -1)
         lt = points - x1y1
         rb = x2y2 - points
-        return paddle.concat([lt, rb], -1).clip(0, self.reg_max - 0.01)
+        ltrb = paddle.concat([lt, rb], -1)
+        return ltrb.clip(self.reg_range[0], self.reg_range[1] - 1 - eps)
 
-    def _df_loss(self, pred_dist, target):
-        target_left = paddle.cast(target, 'int64')
+    def _df_loss(self, pred_dist, target, lower_bound=0):
+        target_left = paddle.cast(target.floor(), 'int64')
         target_right = target_left + 1
         weight_left = target_right.astype('float32') - target
         weight_right = 1 - weight_left
         loss_left = F.cross_entropy(
-            pred_dist, target_left, reduction='none') * weight_left
+            pred_dist, target_left - lower_bound,
+            reduction='none') * weight_left
         loss_right = F.cross_entropy(
-            pred_dist, target_right, reduction='none') * weight_right
+            pred_dist, target_right - lower_bound,
+            reduction='none') * weight_right
         return (loss_left + loss_right).mean(-1, keepdim=True)
 
     def _bbox_loss(self, pred_dist, pred_bboxes, anchor_points, assigned_labels,
@@ -282,14 +287,14 @@ class PPYOLOEHead(nn.Layer):
             loss_iou = loss_iou.sum() / assigned_scores_sum
 
             dist_mask = mask_positive.unsqueeze(-1).tile(
-                [1, 1, (self.reg_max + 1) * 4])
+                [1, 1, self.reg_channels * 4])
             pred_dist_pos = paddle.masked_select(
-                pred_dist, dist_mask).reshape([-1, 4, self.reg_max + 1])
+                pred_dist, dist_mask).reshape([-1, 4, self.reg_channels])
             assigned_ltrb = self._bbox2distance(anchor_points, assigned_bboxes)
             assigned_ltrb_pos = paddle.masked_select(
                 assigned_ltrb, bbox_mask).reshape([-1, 4])
-            loss_dfl = self._df_loss(pred_dist_pos,
-                                     assigned_ltrb_pos) * bbox_weight
+            loss_dfl = self._df_loss(pred_dist_pos, assigned_ltrb_pos,
+                                     self.reg_range[0]) * bbox_weight
             loss_dfl = loss_dfl.sum() / assigned_scores_sum
         else:
             loss_l1 = paddle.zeros([1])
@@ -325,7 +330,7 @@ class PPYOLOEHead(nn.Layer):
                 pred_scores.detach(),
                 pred_bboxes.detach() * stride_tensor,
                 anchor_points,
-                num_anchors_list,
+                stride_tensor,
                 gt_labels,
                 gt_bboxes,
                 pad_gt_mask,

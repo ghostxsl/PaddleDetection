@@ -49,7 +49,7 @@ CustomCSPPAN:
 PPYOLOEHead:
   fpn_strides: [32, 16, 8]
   grid_cell_scale: 5.0
-  grid_cell_offset: 0.5
+  grid_cell_offset: 0.0
   static_assigner_epoch: 4
   use_varifocal_loss: True
   loss_weight: {class: 1.0, iou: 2.5, dfl: 0.5}
@@ -61,6 +61,8 @@ PPYOLOEHead:
     topk: 13
     alpha: 1.0
     beta: 6.0
+    center_radius: 2.5
+    use_bipartite_match: True
   nms:
     name: MultiClassNMS
     nms_top_k: 1000

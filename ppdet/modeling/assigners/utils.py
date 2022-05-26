@@ -127,7 +127,7 @@ def check_points_inside_bboxes(points,
     r = xmax - x
     b = ymax - y
     delta_ltrb = paddle.concat([l, t, r, b], axis=-1)
-    is_in_bboxes = (delta_ltrb.min(axis=-1) > eps)
+    is_in_bboxes = (delta_ltrb.min(axis=-1) > eps).astype(bboxes.dtype)
     if center_radius_tensor is not None:
         # check whether `points` is in `center_radius`
         center_radius_tensor = center_radius_tensor.unsqueeze([0, 1])
@@ -138,11 +138,10 @@ def check_points_inside_bboxes(points,
         r = (cx + center_radius_tensor) - x
         b = (cy + center_radius_tensor) - y
         delta_ltrb_c = paddle.concat([l, t, r, b], axis=-1)
-        is_in_center = (delta_ltrb_c.min(axis=-1) > eps)
-        return (paddle.logical_and(is_in_bboxes, is_in_center),
-                paddle.logical_or(is_in_bboxes, is_in_center))
+        is_in_center = (delta_ltrb_c.min(axis=-1) > eps).astype(bboxes.dtype)
+        return is_in_bboxes, is_in_center
 
-    return is_in_bboxes.astype(bboxes.dtype)
+    return is_in_bboxes
 
 
 def compute_max_iou_anchor(ious):
@@ -216,6 +215,69 @@ def generate_anchors_for_grid_cell(feats,
         stride_tensor.append(
             paddle.full(
                 [num_anchors_list[-1], 1], stride, dtype=feat.dtype))
+    anchors = paddle.concat(anchors)
+    anchors.stop_gradient = True
+    anchor_points = paddle.concat(anchor_points)
+    anchor_points.stop_gradient = True
+    stride_tensor = paddle.concat(stride_tensor)
+    stride_tensor.stop_gradient = True
+    return anchors, anchor_points, num_anchors_list, stride_tensor
+
+
+def dense_anchors_for_grid_cell(feats,
+                                fpn_strides,
+                                grid_cell_size=5.0,
+                                dense_grid_step=0.5):
+    r"""
+    Like ATSS, generate anchors based on grid size.
+    Args:
+        feats (List[Tensor]): shape[s, (b, c, h, w)]
+        fpn_strides (tuple|list): shape[s], stride for each scale feature
+        grid_cell_size (float): anchor size
+        dense_grid_step (float): The range is between 0 and 1.
+    Returns:
+        anchors (Tensor): shape[l, 4], "xmin, ymin, xmax, ymax" format.
+        anchor_points (Tensor): shape[l, 2], "x, y" format.
+        num_anchors_list (List[int]): shape[s], contains [s_1, s_2, ...].
+        stride_tensor (Tensor): shape[l, 1], contains the stride for each scale.
+    """
+    assert len(feats) == len(fpn_strides)
+    anchors = []
+    anchor_points = []
+    num_anchors_list = []
+    stride_tensor = []
+    dtype = feats[0].dtype
+    num_dense_anchors = int(1 / dense_grid_step)
+    grid_cell_offset = paddle.arange(
+        end=1, step=dense_grid_step, dtype=dtype)[:num_dense_anchors]
+    for feat, stride in zip(feats, fpn_strides):
+        _, _, h, w = feat.shape
+        cell_half_size = grid_cell_size * stride * 0.5
+        anchor, anchor_point = [], []
+        for x_offset in grid_cell_offset:
+            for y_offset in grid_cell_offset:
+                shift_x = (paddle.arange(
+                    end=w, dtype=dtype) + x_offset) * stride
+                shift_y = (paddle.arange(
+                    end=h, dtype=dtype) + y_offset) * stride
+                shift_y, shift_x = paddle.meshgrid(shift_y, shift_x)
+                anchor.append(
+                    paddle.stack(
+                        [
+                            shift_x - cell_half_size, shift_y - cell_half_size,
+                            shift_x + cell_half_size, shift_y + cell_half_size
+                        ],
+                        axis=-1).astype(dtype).reshape([-1, 4]))
+                anchor_point.append(
+                    paddle.stack(
+                        [shift_x, shift_y], axis=-1).astype(dtype).reshape(
+                            [-1, 2]))
+        anchors.append(paddle.concat(anchor))
+        anchor_points.append(paddle.concat(anchor_point))
+        num_anchors_list.append(len(anchors[-1]))
+        stride_tensor.append(
+            paddle.full(
+                [num_anchors_list[-1], 1], stride, dtype=dtype))
     anchors = paddle.concat(anchors)
     anchors.stop_gradient = True
     anchor_points = paddle.concat(anchor_points)

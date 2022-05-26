@@ -1,0 +1,20 @@
+metric: COCO
+num_classes: 1
+
+TrainDataset:
+  !COCODataSet
+    dataset_dir: dataset/mot17_ablation
+    anno_path: annotations/train_half.json
+    image_dir: train
+    data_fields: ['image', 'gt_bbox', 'gt_class', 'is_crowd']
+
+EvalDataset:
+  !COCODataSet
+    dataset_dir: dataset/mot17_ablation
+    anno_path: annotations/val_half.json
+    image_dir: train
+
+TestDataset:
+  !ImageFolder
+    dataset_dir: dataset/mot17_ablation
+    anno_path: annotations/val_half.json

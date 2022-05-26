@@ -1,0 +1,44 @@
+_BASE_: [
+  '../runtime.yml',
+  './_base_/mot_detection.yml',
+  './_base_/optimizer_80e.yml',
+  './_base_/ppyoloe_crn.yml',
+  './_base_/ppyoloe_reader.yml',
+]
+
+snapshot_epoch: 10
+weights: output/ppyoloe_crn_s_80e_mot/model_final
+
+pretrain_weights: http://10.181.196.17:8906/nifeng/visdrone/ppyoloe_crn_s_back_300e_coco.pdparams
+# https://paddledet.bj.bcebos.com/models/pretrained/CSPResNetb_s_pretrained.pdparams
+depth_mult: 0.33
+width_mult: 0.50
+
+TrainReader:
+  batch_size: 8
+
+
+PPYOLOEHead:
+  fpn_strides: [32, 16, 8]
+  grid_cell_scale: 5.0
+  grid_cell_offset: 0.0
+  reg_range: [-8, 16]
+  static_assigner_epoch: -1
+  use_varifocal_loss: True
+  loss_weight: {class: 1.0, iou: 2.5, dfl: 0.5}
+  static_assigner:
+    name: ATSSAssigner
+    topk: 9
+  assigner:
+    name: TaskAlignedAssigner
+    topk: 13
+    alpha: 1.0
+    beta: 6.0
+    center_radius: 2.5
+#    use_bipartite_match: True
+  nms:
+    name: MultiClassNMS
+    nms_top_k: 1000
+    keep_top_k: 100
+    score_threshold: 0.01
+    nms_threshold: 0.6
