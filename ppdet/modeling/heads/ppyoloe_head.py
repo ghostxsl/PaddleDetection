@@ -20,7 +20,7 @@ from ppdet.core.workspace import register
 from ..bbox_utils import batch_distance2bbox
 from ..losses import GIoULoss
 from ..initializer import bias_init_with_prob, constant_, normal_
-from ..assigners.utils import generate_anchors_for_grid_cell
+from ..assigners.utils import generate_anchors_for_grid_cell, dense_anchors_for_grid_cell
 from ppdet.modeling.backbones.cspresnet import ConvBNLayer
 from ppdet.modeling.ops import get_static_shape, get_act_fn
 from ppdet.modeling.layers import MultiClassNMS
@@ -56,6 +56,7 @@ class PPYOLOEHead(nn.Layer):
                  fpn_strides=(32, 16, 8),
                  grid_cell_scale=5.0,
                  grid_cell_offset=0.5,
+                 dense_grid_step=0.5,
                  reg_range=(-2, 16),
                  static_assigner_epoch=4,
                  use_varifocal_loss=True,
@@ -77,6 +78,8 @@ class PPYOLOEHead(nn.Layer):
         self.fpn_strides = fpn_strides
         self.grid_cell_scale = grid_cell_scale
         self.grid_cell_offset = grid_cell_offset
+        self.dense_grid_step = dense_grid_step
+        self.num_dense_grid = int(1 / dense_grid_step)**2
         self.reg_range = reg_range
         self.reg_channels = reg_range[1] - reg_range[0]
         self.iou_loss = GIoULoss()
@@ -106,10 +109,13 @@ class PPYOLOEHead(nn.Layer):
         for in_c in self.in_channels:
             self.pred_cls.append(
                 nn.Conv2D(
-                    in_c, self.num_classes, 3, padding=1))
+                    in_c, self.num_dense_grid * self.num_classes, 3, padding=1))
             self.pred_reg.append(
                 nn.Conv2D(
-                    in_c, 4 * self.reg_channels, 3, padding=1))
+                    in_c,
+                    self.num_dense_grid * 4 * self.reg_channels,
+                    3,
+                    padding=1))
         # projection conv
         self.proj_conv = nn.Conv2D(self.reg_channels, 1, 1, bias_attr=False)
         self.proj_conv.skip_quant = True
@@ -134,26 +140,30 @@ class PPYOLOEHead(nn.Layer):
         self.proj_conv.weight.stop_gradient = True
 
         if self.eval_size:
-            anchor_points, stride_tensor = self._generate_anchors()
+            anchor_points, stride_tensor = self._dense_anchors()
             self.anchor_points = anchor_points
             self.stride_tensor = stride_tensor
 
     def forward_train(self, feats, targets):
         anchors, anchor_points, num_anchors_list, stride_tensor = \
-            generate_anchors_for_grid_cell(
+            dense_anchors_for_grid_cell(
                 feats, self.fpn_strides, self.grid_cell_scale,
-                self.grid_cell_offset)
+                self.dense_grid_step)
 
         cls_score_list, reg_distri_list = [], []
         for i, feat in enumerate(feats):
+            b, _, h, w = feat.shape
+            l = self.num_dense_grid * h * w
             avg_feat = F.adaptive_avg_pool2d(feat, (1, 1))
             cls_logit = self.pred_cls[i](self.stem_cls[i](feat, avg_feat) +
                                          feat)
             reg_distri = self.pred_reg[i](self.stem_reg[i](feat, avg_feat))
             # cls and reg
             cls_score = F.sigmoid(cls_logit)
-            cls_score_list.append(cls_score.flatten(2).transpose([0, 2, 1]))
-            reg_distri_list.append(reg_distri.flatten(2).transpose([0, 2, 1]))
+            cls_score_list.append(
+                cls_score.reshape([b, -1, l]).transpose([0, 2, 1]))
+            reg_distri_list.append(
+                reg_distri.reshape([b, -1, l]).transpose([0, 2, 1]))
         cls_score_list = paddle.concat(cls_score_list, axis=1)
         reg_distri_list = paddle.concat(reg_distri_list, axis=1)
 
@@ -186,15 +196,48 @@ class PPYOLOEHead(nn.Layer):
         stride_tensor = paddle.concat(stride_tensor)
         return anchor_points, stride_tensor
 
+    def _dense_anchors(self, feats=None):
+        # just use in eval time
+        anchor_points = []
+        strides_tensor = []
+        num_dense_anchors = int(1 / self.dense_grid_step)
+        grid_cell_offset = paddle.arange(
+            end=1, step=self.dense_grid_step,
+            dtype='float32')[:num_dense_anchors]
+        for i, stride in enumerate(self.fpn_strides):
+            if feats is not None:
+                _, _, h, w = feats[i].shape
+            else:
+                h = int(self.eval_size[0] / stride)
+                w = int(self.eval_size[1] / stride)
+            anchor, stride_tensor = [], []
+            for x_offset in grid_cell_offset:
+                for y_offset in grid_cell_offset:
+                    shift_x = paddle.arange(end=w, dtype='float32') + x_offset
+                    shift_y = paddle.arange(end=h, dtype='float32') + y_offset
+                    shift_y, shift_x = paddle.meshgrid(shift_y, shift_x)
+                    anchor.append(
+                        paddle.cast(
+                            paddle.stack(
+                                [shift_x, shift_y], axis=-1).reshape([-1, 2]),
+                            dtype='float32'))
+                    strides_tensor.append(
+                        paddle.full(
+                            [h * w, 1], stride, dtype='float32'))
+            anchor_points.append(paddle.concat(anchor))
+        anchor_points = paddle.concat(anchor_points)
+        strides_tensor = paddle.concat(strides_tensor)
+        return anchor_points, strides_tensor
+
     def forward_eval(self, feats):
         if self.eval_size:
             anchor_points, stride_tensor = self.anchor_points, self.stride_tensor
         else:
-            anchor_points, stride_tensor = self._generate_anchors(feats)
+            anchor_points, stride_tensor = self._dense_anchors(feats)
         cls_score_list, reg_dist_list = [], []
         for i, feat in enumerate(feats):
             b, _, h, w = feat.shape
-            l = h * w
+            l = self.num_dense_grid * h * w
             avg_feat = F.adaptive_avg_pool2d(feat, (1, 1))
             cls_logit = self.pred_cls[i](self.stem_cls[i](feat, avg_feat) +
                                          feat)
@@ -239,9 +282,9 @@ class PPYOLOEHead(nn.Layer):
         return loss
 
     def _bbox_decode(self, anchor_points, pred_dist):
-        b, l, _ = get_static_shape(pred_dist)
-        pred_dist = F.softmax(pred_dist.reshape([b, l, 4, self.reg_channels
-                                                 ])).matmul(self.proj)
+        b = pred_dist.shape[0]
+        pred_dist = F.softmax(
+            pred_dist.reshape([b, -1, 4, self.reg_channels])).matmul(self.proj)
         return batch_distance2bbox(anchor_points, pred_dist)
 
     def _bbox2distance(self, points, bbox, eps=1e-2):
