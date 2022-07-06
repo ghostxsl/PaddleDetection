@@ -188,17 +188,18 @@ class Detector(object):
                             shape: [N, im_h, im_w]
         '''
         # model prediction
-        np_boxes, np_masks = None, None
+        np_boxes, np_masks, np_boxes_num = None, None, np.array([0])
         for i in range(repeats):
             self.predictor.run()
-            output_names = self.predictor.get_output_names()
-            boxes_tensor = self.predictor.get_output_handle(output_names[0])
-            np_boxes = boxes_tensor.copy_to_cpu()
-            boxes_num = self.predictor.get_output_handle(output_names[1])
-            np_boxes_num = boxes_num.copy_to_cpu()
-            if self.pred_config.mask:
-                masks_tensor = self.predictor.get_output_handle(output_names[2])
-                np_masks = masks_tensor.copy_to_cpu()
+            paddle.device.cuda.synchronize()
+            # output_names = self.predictor.get_output_names()
+            # boxes_tensor = self.predictor.get_output_handle(output_names[0])
+            # np_boxes = boxes_tensor.copy_to_cpu()
+            # boxes_num = self.predictor.get_output_handle(output_names[1])
+            # np_boxes_num = boxes_num.copy_to_cpu()
+            # if self.pred_config.mask:
+            #     masks_tensor = self.predictor.get_output_handle(output_names[2])
+            #     np_masks = masks_tensor.copy_to_cpu()
         result = dict(boxes=np_boxes, masks=np_masks, boxes_num=np_boxes_num)
         return result
 

@@ -30,6 +30,7 @@ EvalReader:
   batch_size: 2
 
 TestReader:
+  fuse_normalize: True
   inputs_def:
     image_shape: [3, *eval_height, *eval_width]
   sample_transforms:
