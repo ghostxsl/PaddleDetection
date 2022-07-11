@@ -201,12 +201,14 @@ class Timer(Times):
         self.postprocess_time_s = Times()
         self.tracking_time_s = Times()
         self.img_num = 0
+        self.image_process_time_s = Times()
 
     def info(self, average=False):
         pre_time = self.preprocess_time_s.value()
         infer_time = self.inference_time_s.value()
         post_time = self.postprocess_time_s.value()
         track_time = self.tracking_time_s.value()
+        image_time = self.image_process_time_s.value()
 
         total_time = pre_time + infer_time + post_time
         if self.with_tracker:
@@ -223,6 +225,8 @@ class Timer(Times):
                                4) if average else infer_time
         tracking_time = round(track_time / max(1, self.img_num),
                               4) if average else track_time
+        image_time = round(image_time / max(1, self.img_num),
+                           4) if average else image_time
 
         average_latency = total_time / max(1, self.img_num)
         qps = 0
@@ -232,14 +236,14 @@ class Timer(Times):
             average_latency * 1000, qps))
         if self.with_tracker:
             print(
-                "preprocess_time(ms): {:.2f}, inference_time(ms): {:.2f}, postprocess_time(ms): {:.2f}, tracking_time(ms): {:.2f}".
-                format(preprocess_time * 1000, inference_time * 1000,
-                       postprocess_time * 1000, tracking_time * 1000))
+                "preprocess_time(ms): {:.2f}, image_time(ms): {:.2f}, inference_time(ms): {:.2f}, postprocess_time(ms): {:.2f}, tracking_time(ms): {:.2f}".
+                format(preprocess_time * 1000, image_time * 1000, inference_time
+                       * 1000, postprocess_time * 1000, tracking_time * 1000))
         else:
             print(
-                "preprocess_time(ms): {:.2f}, inference_time(ms): {:.2f}, postprocess_time(ms): {:.2f}".
-                format(preprocess_time * 1000, inference_time * 1000,
-                       postprocess_time * 1000))
+                "preprocess_time(ms): {:.2f}, image_time(ms): {:.2f}, inference_time(ms): {:.2f}, postprocess_time(ms): {:.2f}".
+                format(preprocess_time * 1000, image_time * 1000, inference_time
+                       * 1000, postprocess_time * 1000))
 
     def report(self, average=False):
         dic = {}
@@ -247,6 +251,7 @@ class Timer(Times):
         infer_time = self.inference_time_s.value()
         post_time = self.postprocess_time_s.value()
         track_time = self.tracking_time_s.value()
+        image_time = self.image_process_time_s.value()
 
         dic['preprocess_time_s'] = round(pre_time / max(1, self.img_num),
                                          4) if average else pre_time
@@ -254,6 +259,8 @@ class Timer(Times):
                                         4) if average else infer_time
         dic['postprocess_time_s'] = round(post_time / max(1, self.img_num),
                                           4) if average else post_time
+        dic['image_time'] = round(image_time / max(1, self.img_num),
+                                  4) if average else image_time
         dic['img_num'] = self.img_num
         total_time = pre_time + infer_time + post_time
         if self.with_tracker:

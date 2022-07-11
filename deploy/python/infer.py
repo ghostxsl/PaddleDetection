@@ -125,7 +125,9 @@ class Detector(object):
     def set_config(self, model_dir):
         return PredictConfig(model_dir)
 
-    def preprocess(self, image_list):
+    def preprocess(self, image_list, speed=False):
+        if speed:
+            self.det_times.image_process_time_s.start()
         preprocess_ops = []
         for op_info in self.pred_config.preprocess_infos:
             new_op_info = op_info.copy()
@@ -139,6 +141,8 @@ class Detector(object):
             input_im_lst.append(im)
             input_im_info_lst.append(im_info)
         inputs = create_inputs(input_im_lst, input_im_info_lst)
+        if speed:
+            self.det_times.image_process_time_s.end()
         input_names = self.predictor.get_input_names()
         for i in range(len(input_names)):
             input_tensor = self.predictor.get_input_handle(input_names[i])
@@ -240,7 +244,7 @@ class Detector(object):
                 # preprocess
                 inputs = self.preprocess(batch_image_list)  # warmup
                 self.det_times.preprocess_time_s.start()
-                inputs = self.preprocess(batch_image_list)
+                inputs = self.preprocess(batch_image_list, speed=True)
                 self.det_times.preprocess_time_s.end()
 
                 # model prediction
@@ -263,7 +267,7 @@ class Detector(object):
             else:
                 # preprocess
                 self.det_times.preprocess_time_s.start()
-                inputs = self.preprocess(batch_image_list)
+                inputs = self.preprocess(batch_image_list, speed=True)
                 self.det_times.preprocess_time_s.end()
 
                 # model prediction

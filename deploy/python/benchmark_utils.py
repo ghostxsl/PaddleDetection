@@ -89,6 +89,7 @@ class PaddleInferBenchmark(object):
 
         self.preprocess_time_s = perf_info.get('preprocess_time_s', 0)
         self.postprocess_time_s = perf_info.get('postprocess_time_s', 0)
+        self.image_time = perf_info.get('image_time', 0)
         self.with_tracker = True if 'tracking_time_s' in perf_info else False
         self.tracking_time_s = perf_info.get('tracking_time_s', 0)
         self.total_time_s = perf_info.get('total_time_s', 0)
@@ -241,12 +242,14 @@ class PaddleInferBenchmark(object):
         if self.with_tracker:
             self.logger.info(
                 f"{identifier} preprocess_time(ms): {round(self.preprocess_time_s*1000, 1)}, "
+                f"image_time(ms): {round(self.image_time*1000, 1)}, "
                 f"inference_time(ms): {round(self.inference_time_s*1000, 1)}, "
                 f"postprocess_time(ms): {round(self.postprocess_time_s*1000, 1)}, "
                 f"tracking_time(ms): {round(self.tracking_time_s*1000, 1)}")
         else:
             self.logger.info(
                 f"{identifier} preprocess_time(ms): {round(self.preprocess_time_s*1000, 1)}, "
+                f"image_time(ms): {round(self.image_time*1000, 1)}, "
                 f"inference_time(ms): {round(self.inference_time_s*1000, 1)}, "
                 f"postprocess_time(ms): {round(self.postprocess_time_s*1000, 1)}"
             )
