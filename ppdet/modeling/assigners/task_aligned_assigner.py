@@ -46,6 +46,19 @@ class TaskAlignedAssigner(nn.Layer):
         self.center_radius = center_radius
         self.eps = eps
 
+    @staticmethod
+    def _xyxy2xywh_2(bbox):
+        x1y1, x2y2 = paddle.split(bbox, 2, -1)
+        wh_2 = (x2y2 - x1y1) * 0.5
+        xy = x1y1 + wh_2
+        return paddle.concat([xy, wh_2], -1)
+
+    def _NWD(self, gt_bbox, pred_bbox, constant=1.0):
+        gt_xywh_2 = self._xyxy2xywh_2(gt_bbox).unsqueeze(-2)
+        pred_xywh_2 = self._xyxy2xywh_2(pred_bbox).unsqueeze(-3)
+        wasserstein = (gt_xywh_2 - pred_xywh_2).norm(2, axis=-1)
+        return paddle.exp(-wasserstein / constant)
+
     @paddle.no_grad()
     def forward(self,
                 pred_scores,
@@ -99,7 +112,7 @@ class TaskAlignedAssigner(nn.Layer):
             return assigned_labels, assigned_bboxes, assigned_scores
 
         # compute iou between gt and pred bbox, [B, n, L]
-        ious = batch_iou_similarity(gt_bboxes, pred_bboxes)
+        # ious = batch_iou_similarity(gt_bboxes, pred_bboxes)
         # gather pred bboxes class score
         pred_scores = pred_scores.transpose([0, 2, 1])
         batch_ind = paddle.arange(
@@ -108,8 +121,10 @@ class TaskAlignedAssigner(nn.Layer):
             [batch_ind.tile([1, num_max_boxes]), gt_labels.squeeze(-1)],
             axis=-1)
         bbox_cls_scores = paddle.gather_nd(pred_scores, gt_labels_ind)
+        # compute Normalized Wasserstein Distance
+        nwd = self._NWD(gt_bboxes, pred_bboxes)
         # compute alignment metrics, [B, n, L]
-        alignment_metrics = bbox_cls_scores.pow(self.alpha) * ious.pow(
+        alignment_metrics = bbox_cls_scores.pow(self.alpha) * nwd.pow(
             self.beta) * pad_gt_mask
 
         # select positive sample, [B, n, L]
@@ -138,7 +153,7 @@ class TaskAlignedAssigner(nn.Layer):
         if mask_positive_sum.max() > 1:
             mask_multiple_gts = (mask_positive_sum.unsqueeze(1) > 1).tile(
                 [1, num_max_boxes, 1])
-            is_max_iou = compute_max_iou_anchor(ious * mask_positive)
+            is_max_iou = compute_max_iou_anchor(nwd * mask_positive)
             mask_positive = paddle.where(mask_multiple_gts, is_max_iou,
                                          mask_positive)
             mask_positive_sum = mask_positive.sum(axis=-2)
@@ -165,8 +180,7 @@ class TaskAlignedAssigner(nn.Layer):
         # rescale alignment metrics
         alignment_metrics *= mask_positive
         max_metrics_per_instance = alignment_metrics.max(axis=-1, keepdim=True)
-        max_ious_per_instance = (ious * mask_positive).max(axis=-1,
-                                                           keepdim=True)
+        max_ious_per_instance = (nwd * mask_positive).max(axis=-1, keepdim=True)
         alignment_metrics = alignment_metrics / (
             max_metrics_per_instance + self.eps) * max_ious_per_instance
         alignment_metrics = alignment_metrics.max(-2).unsqueeze(-1)

@@ -65,11 +65,9 @@ class PPYOLOEHead(nn.Layer):
                  assigner='TaskAlignedAssigner',
                  nms='MultiClassNMS',
                  eval_size=None,
-                 loss_weight={
-                     'class': 1.0,
-                     'iou': 2.5,
-                     'dfl': 0.5,
-                 },
+                 loss_weight={'class': 1.0,
+                              'iou': 2.5,
+                              'dfl': 0.5},
                  trt=False,
                  exclude_nms=False,
                  exclude_post_process=False):
@@ -266,6 +264,19 @@ class PPYOLOEHead(nn.Layer):
             reduction='none') * weight_right
         return (loss_left + loss_right).mean(-1, keepdim=True)
 
+    @staticmethod
+    def _xyxy2xywh_2(bbox):
+        x1y1, x2y2 = paddle.split(bbox, 2, -1)
+        wh_2 = (x2y2 - x1y1) * 0.5
+        xy = x1y1 + wh_2
+        return paddle.concat([xy, wh_2], -1)
+
+    def _NWD(self, gt_bbox, pred_bbox, constant=1.0):
+        gt_xywh_2 = self._xyxy2xywh_2(gt_bbox)
+        pred_xywh_2 = self._xyxy2xywh_2(pred_bbox)
+        wasserstein = (gt_xywh_2 - pred_xywh_2).norm(2, axis=-1)
+        return paddle.exp(-wasserstein / constant)
+
     def _bbox_loss(self, pred_dist, pred_bboxes, anchor_points, assigned_labels,
                    assigned_bboxes, assigned_scores, assigned_scores_sum):
         # select positive samples mask
@@ -369,7 +380,7 @@ class PPYOLOEHead(nn.Layer):
             'loss_cls': loss_cls,
             'loss_iou': loss_iou,
             'loss_dfl': loss_dfl,
-            'loss_l1': loss_l1,
+            'loss_l1': loss_l1
         }
         return out_dict
 
