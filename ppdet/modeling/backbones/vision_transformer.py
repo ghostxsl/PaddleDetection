@@ -17,6 +17,8 @@ import paddle
 import paddle.nn as nn
 import paddle.nn.functional as F
 import numpy as np
+from paddle import ParamAttr
+from paddle.regularizer import L2Decay
 from paddle.nn.initializer import Constant
 
 from ppdet.modeling.shape_spec import ShapeSpec
@@ -35,9 +37,15 @@ class Mlp(nn.Layer):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
-        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.fc1 = nn.Linear(
+            in_features,
+            hidden_features,
+            bias_attr=ParamAttr(regularizer=L2Decay(0.0)))
         self.act = act_layer()
-        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.fc2 = nn.Linear(
+            hidden_features,
+            out_features,
+            bias_attr=ParamAttr(regularizer=L2Decay(0.0)))
         self.drop = nn.Dropout(drop)
 
     def forward(self, x):
@@ -67,9 +75,13 @@ class Attention(nn.Layer):
 
         if qkv_bias:
             self.q_bias = self.create_parameter(
-                shape=([dim]), default_initializer=zeros_)
+                shape=([dim]),
+                attr=ParamAttr(regularizer=L2Decay(0.0)),
+                default_initializer=zeros_)
             self.v_bias = self.create_parameter(
-                shape=([dim]), default_initializer=zeros_)
+                shape=([dim]),
+                attr=ParamAttr(regularizer=L2Decay(0.0)),
+                default_initializer=zeros_)
         else:
             self.q_bias = None
             self.v_bias = None
@@ -117,7 +129,8 @@ class Attention(nn.Layer):
             self.relative_position_index = None
 
         self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
+        self.proj = nn.Linear(
+            dim, dim, bias_attr=ParamAttr(regularizer=L2Decay(0.0)))
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, x, rel_pos_bias=None):
@@ -172,7 +185,11 @@ class Block(nn.Layer):
                  norm_layer='nn.LayerNorm',
                  epsilon=1e-5):
         super().__init__()
-        self.norm1 = nn.LayerNorm(dim, epsilon=1e-6)
+        self.norm1 = nn.LayerNorm(
+            dim,
+            epsilon=1e-6,
+            weight_attr=ParamAttr(regularizer=L2Decay(0.0)),
+            bias_attr=ParamAttr(regularizer=L2Decay(0.0)))
         self.attn = Attention(
             dim,
             num_heads=num_heads,
@@ -183,7 +200,11 @@ class Block(nn.Layer):
             window_size=window_size)
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0. else Identity()
-        self.norm2 = eval(norm_layer)(dim, epsilon=epsilon)
+        self.norm2 = eval(norm_layer)(
+            dim,
+            epsilon=epsilon,
+            weight_attr=ParamAttr(regularizer=L2Decay(0.0)),
+            bias_attr=ParamAttr(regularizer=L2Decay(0.0)))
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim,
                        hidden_features=mlp_hidden_dim,
@@ -362,23 +383,11 @@ class VisionTransformer(nn.Layer):
         self.pos_w = self.patch_embed.num_patches_in_w
         self.pos_h = self.patch_embed.num_patches_in_h
 
-        self.cls_token = self.create_parameter(
-            shape=(1, 1, embed_dim),
-            default_initializer=paddle.nn.initializer.Constant(value=0.))
-
         if use_abs_pos_emb:
             self.pos_embed = self.create_parameter(
                 shape=(1, self.pos_w * self.pos_h + 1, embed_dim),
                 default_initializer=paddle.nn.initializer.TruncatedNormal(
                     std=.02))
-        elif use_sincos_pos_emb:
-            pos_embed = self.build_2d_sincos_position_embedding(embed_dim)
-
-            self.pos_embed = pos_embed
-            self.pos_embed = self.create_parameter(shape=pos_embed.shape)
-            self.pos_embed.set_value(pos_embed.numpy())
-            self.pos_embed.stop_gradient = True
-
         else:
             self.pos_embed = None
 
@@ -414,10 +423,8 @@ class VisionTransformer(nn.Layer):
 
         assert len(out_indices) <= 4, ''
         self.out_indices = out_indices
-        self.out_channels = [embed_dim for _ in range(len(out_indices))]
-        self.out_strides = [4, 8, 16, 32][-len(out_indices):] if with_fpn else [
-            8 for _ in range(len(out_indices))
-        ]
+        self.out_channels = [embed_dim for _ in range(3)]
+        self.out_strides = [8, 16, 32]
 
         self.norm = Identity()
 
@@ -440,7 +447,8 @@ class VisionTransformer(nn.Layer):
             model_state_dict = self.state_dict()
             pos_embed_name = "pos_embed"
 
-            if pos_embed_name in load_state_dict.keys():
+            if pos_embed_name in load_state_dict.keys(
+            ) and pos_embed_name in model_state_dict.keys():
                 load_pos_embed = paddle.to_tensor(
                     load_state_dict[pos_embed_name], dtype="float32")
                 if self.pos_embed.shape != load_pos_embed.shape:
@@ -469,9 +477,12 @@ class VisionTransformer(nn.Layer):
                 nn.Conv2DTranspose(
                     embed_dim, embed_dim, kernel_size=2, stride=2), )
 
-            self.fpn2 = nn.Sequential(
-                nn.Conv2DTranspose(
-                    embed_dim, embed_dim, kernel_size=2, stride=2), )
+            self.fpn2 = nn.Conv2DTranspose(
+                embed_dim,
+                embed_dim,
+                kernel_size=2,
+                stride=2,
+                bias_attr=ParamAttr(regularizer=L2Decay(0.0)))
 
             self.fpn3 = Identity()
 
@@ -545,32 +556,28 @@ class VisionTransformer(nn.Layer):
 
     def build_2d_sincos_position_embedding(
             self,
+            h,
+            w,
             embed_dim=768,
             temperature=10000., ):
-        h, w = self.patch_embed.patch_shape
-        grid_w = paddle.arange(w, dtype=paddle.float32)
-        grid_h = paddle.arange(h, dtype=paddle.float32)
-        grid_w, grid_h = paddle.meshgrid(grid_w, grid_h)
+        grid_x = paddle.arange(w, dtype=paddle.float32)
+        grid_y = paddle.arange(h, dtype=paddle.float32)
+        grid_y, grid_x = paddle.meshgrid(grid_y, grid_x)
         assert embed_dim % 4 == 0, 'Embed dimension must be divisible by 4 for 2D sin-cos position embedding'
         pos_dim = embed_dim // 4
         omega = paddle.arange(pos_dim, dtype=paddle.float32) / pos_dim
         omega = 1. / (temperature**omega)
 
-        out_w = grid_w.flatten()[..., None] @omega[None]
-        out_h = grid_h.flatten()[..., None] @omega[None]
+        out_x = grid_x.flatten()[..., None] @omega[None]
+        out_y = grid_y.flatten()[..., None] @omega[None]
 
         pos_emb = paddle.concat(
             [
-                paddle.sin(out_w), paddle.cos(out_w), paddle.sin(out_h),
-                paddle.cos(out_h)
+                paddle.sin(out_y), paddle.cos(out_y), paddle.sin(out_x),
+                paddle.cos(out_x)
             ],
             axis=1)[None, :, :]
-
-        pe_token = paddle.zeros([1, 1, embed_dim], dtype=paddle.float32)
-        pos_embed = paddle.concat([pe_token, pos_emb], axis=1)
-        # pos_embed.stop_gradient = True
-
-        return pos_embed
+        return pos_emb
 
     def forward(self, x):
         x = x['image'] if isinstance(x, dict) else x
@@ -580,14 +587,12 @@ class VisionTransformer(nn.Layer):
 
         B, D, Hp, Wp = x.shape  # b * c * h * w
 
-        cls_tokens = self.cls_token.expand(
-            (B, self.cls_token.shape[-2], self.cls_token.shape[-1]))
         x = x.flatten(2).transpose([0, 2, 1])  # b * hw * c
-        x = paddle.concat([cls_tokens, x], axis=1)
 
         if self.pos_embed is not None:
-            # x = x + self.interpolate_pos_encoding(x, w, h)
             x = x + self.interpolate_pos_encoding(x, h, w)
+        elif self.use_sincos_pos_emb:
+            x = x + self.build_2d_sincos_position_embedding(Hp, Wp)
 
         x = self.pos_drop(x)
 
@@ -603,16 +608,21 @@ class VisionTransformer(nn.Layer):
                 x = blk(x, rel_pos_bias)
 
             if idx in self.out_indices:
-                xp = paddle.reshape(
-                    paddle.transpose(
-                        self.norm(x[:, 1:, :]), perm=[0, 2, 1]),
-                    shape=[B, D, Hp, Wp])
-                feats.append(xp)
+                feats.append(x.reshape([B, Hp, Wp, D]))
 
-        if self.with_fpn:
-            fpns = [self.fpn1, self.fpn2, self.fpn3, self.fpn4]
-            for i in range(len(feats)):
-                feats[i] = fpns[i](feats[i])
+        # if self.with_fpn:
+        #     # fpns = [self.fpn1, self.fpn2, self.fpn3, self.fpn4]
+        #     # for i in range(len(feats)):
+        #     #     feats[i] = fpns[i](feats[i])
+        #     fpns = [self.fpn2, self.fpn3, self.fpn4]
+        #
+        #     if len(feats) == 1:
+        #         outputs = [m(feats[-1]) for i, m in enumerate(fpns)]
+        #     else:
+        #         assert len(feats) == len(fpns), ''
+        #         outputs = [m(feats[i]) for i, m in enumerate(fpns)]
+        #
+        #     return outputs
 
         return feats
 
@@ -622,7 +632,7 @@ class VisionTransformer(nn.Layer):
 
     @property
     def no_weight_decay(self):
-        return {'pos_embed', 'cls_token'}
+        return {'pos_embed'}
 
     @property
     def out_shape(self):

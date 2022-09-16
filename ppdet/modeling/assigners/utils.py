@@ -80,7 +80,7 @@ def pad_gt(gt_labels, gt_bboxes, gt_scores=None):
         raise ValueError('The input `gt_labels` or `gt_bboxes` is invalid! ')
 
 
-def gather_topk_anchors(metrics, topk, largest=True, topk_mask=None, eps=1e-9):
+def gather_topk_anchors(metrics, topk, largest=True, topk_mask=None, eps=1e-5):
     r"""
     Args:
         metrics (Tensor, float32): shape[B, n, L], n: num_gts, L: num_anchors
@@ -108,7 +108,7 @@ def gather_topk_anchors(metrics, topk, largest=True, topk_mask=None, eps=1e-9):
 def check_points_inside_bboxes(points,
                                bboxes,
                                center_radius_tensor=None,
-                               eps=1e-9):
+                               eps=1e-5):
     r"""
     Args:
         points (Tensor, float32): shape[L, 2], "xy" format, L: num_anchors
@@ -127,7 +127,7 @@ def check_points_inside_bboxes(points,
     r = xmax - x
     b = ymax - y
     delta_ltrb = paddle.concat([l, t, r, b], axis=-1)
-    is_in_bboxes = (delta_ltrb.min(axis=-1) > eps)
+    is_in_bboxes = (delta_ltrb.min(axis=-1) > eps).astype(bboxes.dtype)
     if center_radius_tensor is not None:
         # check whether `points` is in `center_radius`
         center_radius_tensor = center_radius_tensor.unsqueeze([0, 1])
@@ -138,11 +138,10 @@ def check_points_inside_bboxes(points,
         r = (cx + center_radius_tensor) - x
         b = (cy + center_radius_tensor) - y
         delta_ltrb_c = paddle.concat([l, t, r, b], axis=-1)
-        is_in_center = (delta_ltrb_c.min(axis=-1) > eps)
-        return (paddle.logical_and(is_in_bboxes, is_in_center),
-                paddle.logical_or(is_in_bboxes, is_in_center))
+        is_in_center = (delta_ltrb_c.min(axis=-1) > eps).astype(bboxes.dtype)
+        return is_in_bboxes, is_in_center
 
-    return is_in_bboxes.astype(bboxes.dtype)
+    return is_in_bboxes
 
 
 def compute_max_iou_anchor(ious):
@@ -177,7 +176,8 @@ def generate_anchors_for_grid_cell(feats,
                                    fpn_strides,
                                    grid_cell_size=5.0,
                                    grid_cell_offset=0.5,
-                                   dtype='float32'):
+                                   dtype='float32',
+                                   data_format="NCHW"):
     r"""
     Like ATSS, generate anchors based on grid size.
     Args:
@@ -192,12 +192,18 @@ def generate_anchors_for_grid_cell(feats,
         stride_tensor (Tensor): shape[l, 1], contains the stride for each scale.
     """
     assert len(feats) == len(fpn_strides)
+    assert data_format in ["NCHW", "NHWC"], \
+        f"{data_format} format is not supported."
+
     anchors = []
     anchor_points = []
     num_anchors_list = []
     stride_tensor = []
     for feat, stride in zip(feats, fpn_strides):
-        _, _, h, w = feat.shape
+        if data_format == "NCHW":
+            _, _, h, w = feat.shape
+        else:
+            _, h, w, _ = feat.shape
         cell_half_size = grid_cell_size * stride * 0.5
         shift_x = (paddle.arange(end=w) + grid_cell_offset) * stride
         shift_y = (paddle.arange(end=h) + grid_cell_offset) * stride
