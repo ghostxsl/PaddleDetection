@@ -1,0 +1,64 @@
+_BASE_: [
+  '../datasets/coco_detection.yml',
+  '../runtime.yml',
+  './_base_/optimizer_30e.yml',
+  './_base_/ppyoloe_vit_reader.yml',
+]
+
+log_iter: 200
+snapshot_epoch: 2
+weights: output/ppyoloe_vitdet_30e/model_final
+pretrain_weights: http://10.255.134.13:8091/weights/vit_base_mae_torch_pretrain.pdparams
+
+architecture: ViTDet
+use_ema: true
+ema_decay: 0.9999
+ema_decay_type: "exponential"
+ema_black_list: ['pos_embed', 'proj_conv']
+custom_black_list: ['reduce_mean']
+
+ViTDet:
+  backbone: VisionTransformer
+  neck: ~
+  head: PPYOLOTHead
+
+VisionTransformer:
+  patch_size: 16
+  embed_dim: 768
+  depth: 12
+  num_heads: 12
+  mlp_ratio: 4
+  qkv_bias: True
+  drop_rate: 0.0
+  drop_path_rate: 0.1
+  lr_decay_rate: 0.7
+  global_attn_indexes: [2, 5, 8, 11]
+  use_rel_pos: True
+  window_size: 14
+  use_sincos_pos_emb: True
+  out_indices: [11, ]
+  with_fpn: True
+  fpn_dim: [192, 384, 768]
+
+PPYOLOTHead:
+  fpn_strides: [8, 16, 32]
+  in_channels: [192, 384, 768]
+  grid_cell_scale: 5.0
+  grid_cell_offset: 0.5
+  static_assigner_epoch: 10
+  use_varifocal_loss: True
+  loss_weight: {class: 1.0, iou: 2.5, dfl: 0.5}
+  static_assigner:
+    name: ATSSAssigner
+    topk: 9
+  assigner:
+    name: TaskAlignedAssigner
+    topk: 13
+    alpha: 1.0
+    beta: 6.0
+  nms:
+    name: MultiClassNMS
+    nms_top_k: 1000
+    keep_top_k: 300
+    score_threshold: 0.01
+    nms_threshold: 0.7

@@ -1,0 +1,18 @@
+epoch: &epoch 30
+
+LearningRate:
+  base_lr: 0.0002
+  schedulers:
+    - !CosineDecay
+      max_epochs: *epoch
+      min_lr_ratio: 0.01
+      # last_plateau_epochs: 10
+    - !LinearWarmup
+      start_factor: 0.001
+      epochs: 1
+
+OptimizerBuilder:
+  clip_grad_by_norm: 1.0
+  optimizer:
+    type: AdamW
+    weight_decay: 0.05
