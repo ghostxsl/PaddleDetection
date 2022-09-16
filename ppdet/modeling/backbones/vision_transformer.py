@@ -17,6 +17,8 @@ import paddle
 import paddle.nn as nn
 import paddle.nn.functional as F
 import numpy as np
+from paddle import ParamAttr
+from paddle.regularizer import L2Decay
 from paddle.nn.initializer import Constant
 
 from ppdet.modeling.shape_spec import ShapeSpec
@@ -35,9 +37,15 @@ class Mlp(nn.Layer):
         super().__init__()
         out_features = out_features or in_features
         hidden_features = hidden_features or in_features
-        self.fc1 = nn.Linear(in_features, hidden_features)
+        self.fc1 = nn.Linear(
+            in_features,
+            hidden_features,
+            bias_attr=ParamAttr(regularizer=L2Decay(0.0)))
         self.act = act_layer()
-        self.fc2 = nn.Linear(hidden_features, out_features)
+        self.fc2 = nn.Linear(
+            hidden_features,
+            out_features,
+            bias_attr=ParamAttr(regularizer=L2Decay(0.0)))
         self.drop = nn.Dropout(drop)
 
     def forward(self, x):
@@ -67,9 +75,13 @@ class Attention(nn.Layer):
 
         if qkv_bias:
             self.q_bias = self.create_parameter(
-                shape=([dim]), default_initializer=zeros_)
+                shape=([dim]),
+                attr=ParamAttr(regularizer=L2Decay(0.0)),
+                default_initializer=zeros_)
             self.v_bias = self.create_parameter(
-                shape=([dim]), default_initializer=zeros_)
+                shape=([dim]),
+                attr=ParamAttr(regularizer=L2Decay(0.0)),
+                default_initializer=zeros_)
         else:
             self.q_bias = None
             self.v_bias = None
@@ -117,7 +129,8 @@ class Attention(nn.Layer):
             self.relative_position_index = None
 
         self.attn_drop = nn.Dropout(attn_drop)
-        self.proj = nn.Linear(dim, dim)
+        self.proj = nn.Linear(
+            dim, dim, bias_attr=ParamAttr(regularizer=L2Decay(0.0)))
         self.proj_drop = nn.Dropout(proj_drop)
 
     def forward(self, x, rel_pos_bias=None):
@@ -172,7 +185,11 @@ class Block(nn.Layer):
                  norm_layer='nn.LayerNorm',
                  epsilon=1e-5):
         super().__init__()
-        self.norm1 = nn.LayerNorm(dim, epsilon=1e-6)
+        self.norm1 = nn.LayerNorm(
+            dim,
+            epsilon=1e-6,
+            weight_attr=ParamAttr(regularizer=L2Decay(0.0)),
+            bias_attr=ParamAttr(regularizer=L2Decay(0.0)))
         self.attn = Attention(
             dim,
             num_heads=num_heads,
@@ -183,7 +200,11 @@ class Block(nn.Layer):
             window_size=window_size)
         # NOTE: drop path for stochastic depth, we shall see if this is better than dropout here
         self.drop_path = DropPath(drop_path) if drop_path > 0. else Identity()
-        self.norm2 = eval(norm_layer)(dim, epsilon=epsilon)
+        self.norm2 = eval(norm_layer)(
+            dim,
+            epsilon=epsilon,
+            weight_attr=ParamAttr(regularizer=L2Decay(0.0)),
+            bias_attr=ParamAttr(regularizer=L2Decay(0.0)))
         mlp_hidden_dim = int(dim * mlp_ratio)
         self.mlp = Mlp(in_features=dim,
                        hidden_features=mlp_hidden_dim,
@@ -364,6 +385,7 @@ class VisionTransformer(nn.Layer):
 
         self.cls_token = self.create_parameter(
             shape=(1, 1, embed_dim),
+            attr=ParamAttr(regularizer=L2Decay(0.0)),
             default_initializer=paddle.nn.initializer.Constant(value=0.))
 
         if use_abs_pos_emb:
@@ -414,10 +436,8 @@ class VisionTransformer(nn.Layer):
 
         assert len(out_indices) <= 4, ''
         self.out_indices = out_indices
-        self.out_channels = [embed_dim for _ in range(len(out_indices))]
-        self.out_strides = [4, 8, 16, 32][-len(out_indices):] if with_fpn else [
-            8 for _ in range(len(out_indices))
-        ]
+        self.out_channels = [embed_dim for _ in range(3)]
+        self.out_strides = [8, 16, 32]
 
         self.norm = Identity()
 
@@ -469,9 +489,12 @@ class VisionTransformer(nn.Layer):
                 nn.Conv2DTranspose(
                     embed_dim, embed_dim, kernel_size=2, stride=2), )
 
-            self.fpn2 = nn.Sequential(
-                nn.Conv2DTranspose(
-                    embed_dim, embed_dim, kernel_size=2, stride=2), )
+            self.fpn2 = nn.Conv2DTranspose(
+                embed_dim,
+                embed_dim,
+                kernel_size=2,
+                stride=2,
+                bias_attr=ParamAttr(regularizer=L2Decay(0.0)))
 
             self.fpn3 = Identity()
 
@@ -610,9 +633,18 @@ class VisionTransformer(nn.Layer):
                 feats.append(xp)
 
         if self.with_fpn:
-            fpns = [self.fpn1, self.fpn2, self.fpn3, self.fpn4]
-            for i in range(len(feats)):
-                feats[i] = fpns[i](feats[i])
+            # fpns = [self.fpn1, self.fpn2, self.fpn3, self.fpn4]
+            # for i in range(len(feats)):
+            #     feats[i] = fpns[i](feats[i])
+            fpns = [self.fpn2, self.fpn3, self.fpn4]
+
+            if len(feats) == 1:
+                outputs = [m(feats[-1]) for i, m in enumerate(fpns)]
+            else:
+                assert len(feats) == len(fpns), ''
+                outputs = [m(feats[i]) for i, m in enumerate(fpns)]
+
+            return outputs
 
         return feats
 
