@@ -39,10 +39,10 @@
 
 | 模型          | Base mAP | 离线量化mAP | ACT量化mAP(paddle/trt_int8) | TRT-FP32 | TRT-FP16 | TRT-INT8 |                       配置文件                       |                                             量化模型                                              |
 |:------------|:--------:|:-------:|:-------------------------:|:--------:|:--------:|:--------:|:------------------------------------------------:|:---------------------------------------------------------------------------------------------:|
-| PP-YOLOE+_s |   43.7   |    -    |         43.0/42.7         |  5.5ms   |  3.9ms   |  3.9ms   | [config](./configs/ppyoloe_plus_s_qat_dis.yaml)  | [Quant Model](https://bj.bcebos.com/v1/paddledet/deploy/Inference/ppyoloe_plus_s_qat_dis.tar) |
-| PP-YOLOE+_m |   49.8   |    -    |         49.3/45.9         |  8.3ms   |  5.5ms   |  5.4ms   | [config](./configs/ppyoloe_plus_m_qat_dis.yaml)  | [Quant Model](https://bj.bcebos.com/v1/paddledet/deploy/Inference/ppyoloe_plus_m_qat_dis.tar) |
-| PP-YOLOE+_l |   52.9   |    -    |         52.5/52.4         |  12.5ms  |  6.8ms   |  6.6ms   | [config](./configs/ppyoloe_plus_l_qat_dis.yaml)  | [Quant Model](https://bj.bcebos.com/v1/paddledet/deploy/Inference/ppyoloe_plus_l_qat_dis.tar) |
-| PP-YOLOE+_x |   54.7   |    -    |         54.4/53.5         |  20.0ms  |  10.0ms  |  9.7ms   | [config](./configs/ppyoloe_plus_x_qat_dis.yaml)  | [Quant Model](https://bj.bcebos.com/v1/paddledet/deploy/Inference/ppyoloe_plus_x_qat_dis.tar) |
+| PP-YOLOE+_s |   43.7   |    -    |         42.9/42.9         |  4.9ms   |  3.4ms   |  3.7ms   | [config](./configs/ppyoloe_plus_s_qat_dis.yaml)  | [Quant Model](https://bj.bcebos.com/v1/paddledet/deploy/Inference/ppyoloe_plus_s_qat_dis.tar) |
+| PP-YOLOE+_m |   49.8   |    -    |         49.4/48.6         |  7.5ms   |  4.8ms   |  5.7ms   | [config](./configs/ppyoloe_plus_m_qat_dis.yaml)  | [Quant Model](https://bj.bcebos.com/v1/paddledet/deploy/Inference/ppyoloe_plus_m_qat_dis.tar) |
+| PP-YOLOE+_l |   52.9   |    -    |         52.6/52.5         |  11.6ms  |  6.1ms   |  7.7ms   | [config](./configs/ppyoloe_plus_l_qat_dis.yaml)  | [Quant Model](https://bj.bcebos.com/v1/paddledet/deploy/Inference/ppyoloe_plus_l_qat_dis.tar) |
+| PP-YOLOE+_x |   54.7   |    -    |         54.4/54.3         |  20.0ms  |  10.0ms  |  9.7ms   | [config](./configs/ppyoloe_plus_x_qat_dis.yaml)  | [Quant Model](https://bj.bcebos.com/v1/paddledet/deploy/Inference/ppyoloe_plus_x_qat_dis.tar) |
 
 - mAP的指标均在COCO val2017数据集中评测得到，IoU=0.5:0.95。
 - PP-YOLOE+模型在Tesla V100的GPU环境下测试，CUDA11.2 + cudnn8.2.0 + TRT8.0.1.6，batch_size=1，包含NMS，测试脚本是[benchmark demo](https://github.com/PaddlePaddle/PaddleDetection/tree/release/2.4/deploy/python)。
