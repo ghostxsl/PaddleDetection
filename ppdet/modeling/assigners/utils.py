@@ -177,7 +177,8 @@ def generate_anchors_for_grid_cell(feats,
                                    fpn_strides,
                                    grid_cell_size=5.0,
                                    grid_cell_offset=0.5,
-                                   dtype='float32'):
+                                   dtype='float32',
+                                   data_format="NCHW"):
     r"""
     Like ATSS, generate anchors based on grid size.
     Args:
@@ -192,12 +193,18 @@ def generate_anchors_for_grid_cell(feats,
         stride_tensor (Tensor): shape[l, 1], contains the stride for each scale.
     """
     assert len(feats) == len(fpn_strides)
+    assert data_format in ["NCHW", "NHWC"], \
+        f"{data_format} format is not supported."
+
     anchors = []
     anchor_points = []
     num_anchors_list = []
     stride_tensor = []
     for feat, stride in zip(feats, fpn_strides):
-        _, _, h, w = feat.shape
+        if data_format == "NCHW":
+            _, _, h, w = feat.shape
+        else:
+            _, h, w, _ = feat.shape
         cell_half_size = grid_cell_size * stride * 0.5
         shift_x = (paddle.arange(end=w) + grid_cell_offset) * stride
         shift_y = (paddle.arange(end=h) + grid_cell_offset) * stride
