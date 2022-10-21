@@ -28,7 +28,7 @@ from paddle import ParamAttr
 from ppdet.core.workspace import register
 from ..layers import MultiHeadAttention
 from .position_encoding import PositionEmbedding
-from .utils import _get_clones, deformable_attention_core_func
+from .utils import _get_clones, deformable_attention_core_func, get_valid_ratio
 from ..initializer import linear_init_, constant_, xavier_uniform_, normal_
 
 __all__ = ['DeformableTransformer']
@@ -447,14 +447,7 @@ class DeformableTransformer(nn.Layer):
     def from_config(cls, cfg, input_shape):
         return {'backbone_num_channels': [i.channels for i in input_shape], }
 
-    def _get_valid_ratio(self, mask):
-        _, H, W = mask.shape
-        valid_ratio_h = paddle.sum(mask[:, :, 0], 1) / H
-        valid_ratio_w = paddle.sum(mask[:, 0, :], 1) / W
-        valid_ratio = paddle.stack([valid_ratio_w, valid_ratio_h], -1)
-        return valid_ratio
-
-    def forward(self, src_feats, src_mask=None):
+    def forward(self, src_feats, src_mask=None, *args, **kwargs):
         srcs = []
         for i in range(len(src_feats)):
             srcs.append(self.input_proj[i](src_feats[i]))
@@ -479,11 +472,9 @@ class DeformableTransformer(nn.Layer):
                 mask = F.interpolate(src_mask.unsqueeze(0), size=(h, w))[0]
             else:
                 mask = paddle.ones([bs, h, w])
-            valid_ratios.append(self._get_valid_ratio(mask))
-            pos_embed = self.position_embedding(mask).flatten(2).transpose(
-                [0, 2, 1])
-            lvl_pos_embed = pos_embed + self.level_embed.weight[level].reshape(
-                [1, 1, -1])
+            valid_ratios.append(get_valid_ratio(mask))
+            pos_embed = self.position_embedding(mask)
+            lvl_pos_embed = pos_embed + self.level_embed.weight[level]
             lvl_pos_embed_flatten.append(lvl_pos_embed)
             mask = mask.flatten(1)
             mask_flatten.append(mask)
