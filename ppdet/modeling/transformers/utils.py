@@ -67,24 +67,27 @@ def inverse_sigmoid(x, eps=1e-6):
 
 
 def deformable_attention_core_func(value, value_spatial_shapes,
-                                   sampling_locations, attention_weights):
+                                   value_level_start_index, sampling_locations,
+                                   attention_weights):
     """
     Args:
         value (Tensor): [bs, value_length, n_head, c]
         value_spatial_shapes (Tensor): [n_levels, 2]
+        value_level_start_index (Tensor): [n_levels]
         sampling_locations (Tensor): [bs, query_length, n_head, n_levels, n_points, 2]
         attention_weights (Tensor): [bs, query_length, n_head, n_levels, n_points]
 
     Returns:
         output (Tensor): [bs, Length_{query}, C]
     """
-    bs, Len_v, n_head, c = value.shape
-    _, Len_q, n_head, n_levels, n_points, _ = sampling_locations.shape
+    bs, _, n_head, c = value.shape
+    _, Len_q, _, n_levels, n_points, _ = sampling_locations.shape
 
-    value_list = value.split(value_spatial_shapes.prod(1).tolist(), axis=1)
+    value_list = value.split(
+        value_spatial_shapes.prod(1).split(n_levels), axis=1)
     sampling_grids = 2 * sampling_locations - 1
     sampling_value_list = []
-    for level, (h, w) in enumerate(value_spatial_shapes.tolist()):
+    for level, (h, w) in enumerate(value_spatial_shapes):
         # N_, H_*W_, M_, D_ -> N_, H_*W_, M_*D_ -> N_, M_*D_, H_*W_ -> N_*M_, D_, H_, W_
         value_l_ = value_list[level].flatten(2).transpose(
             [0, 2, 1]).reshape([bs * n_head, c, h, w])

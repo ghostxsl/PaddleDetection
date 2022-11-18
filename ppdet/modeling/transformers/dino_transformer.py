@@ -32,8 +32,8 @@ from .position_encoding import PositionEmbedding
 from ..heads.detr_head import MLP
 from ..initializer import (linear_init_, constant_, xavier_uniform_, normal_,
                            bias_init_with_prob)
-from .utils import (_get_clones, deformable_attention_core_func,
-                    get_valid_ratio, get_contrastive_denoising_training_group,
+from .utils import (_get_clones, get_valid_ratio,
+                    get_contrastive_denoising_training_group,
                     get_sine_pos_embed, inverse_sigmoid)
 
 __all__ = ['DINOTransformer']
@@ -67,6 +67,13 @@ class MSDeformableAttention(nn.Layer):
         self.attention_weights = nn.Linear(embed_dim, self.total_points)
         self.value_proj = nn.Linear(embed_dim, embed_dim)
         self.output_proj = nn.Linear(embed_dim, embed_dim)
+        try:
+            # use cuda op
+            from deformable_detr_ops import ms_deformable_attn
+        except:
+            # use paddle func
+            from .utils import deformable_attention_core_func as ms_deformable_attn
+        self.ms_deformable_attn_core = ms_deformable_attn
 
         self._reset_parameters()
 
@@ -99,6 +106,7 @@ class MSDeformableAttention(nn.Layer):
                 reference_points,
                 value,
                 value_spatial_shapes,
+                value_level_start_index,
                 value_mask=None):
         """
         Args:
@@ -107,6 +115,7 @@ class MSDeformableAttention(nn.Layer):
                 bottom-right (1, 1), including padding area
             value (Tensor): [bs, value_length, C]
             value_spatial_shapes (Tensor): [n_levels, 2], [(H_0, W_0), (H_1, W_1), ..., (H_{L-1}, W_{L-1})]
+            value_level_start_index (Tensor(int64)): [n_levels], [0, H_0*W_0, H_0*W_0+H_1*W_1, ...]
             value_mask (Tensor): [bs, value_length], True for non-padding elements, False for padding elements
 
         Returns:
@@ -144,8 +153,9 @@ class MSDeformableAttention(nn.Layer):
                 "Last dim of reference_points must be 2 or 4, but get {} instead.".
                 format(reference_points.shape[-1]))
 
-        output = deformable_attention_core_func(
-            value, value_spatial_shapes, sampling_locations, attention_weights)
+        output = self.ms_deformable_attn_core(
+            value, value_spatial_shapes, value_level_start_index,
+            sampling_locations, attention_weights)
         output = self.output_proj(output)
 
         return output
@@ -204,15 +214,13 @@ class DINOTransformerEncoderLayer(nn.Layer):
                 src,
                 reference_points,
                 spatial_shapes,
+                level_start_index,
                 src_mask=None,
                 query_pos_embed=None):
         # self attention
         src2 = self.self_attn(
-            query=self.with_pos_embed(src, query_pos_embed),
-            reference_points=reference_points,
-            value=src,
-            value_spatial_shapes=spatial_shapes,
-            value_mask=src_mask)
+            self.with_pos_embed(src, query_pos_embed), reference_points, src,
+            spatial_shapes, level_start_index, src_mask)
         src = src + self.dropout1(src2)
         src = self.norm1(src)
         # ffn
@@ -228,13 +236,12 @@ class DINOTransformerEncoder(nn.Layer):
         self.num_layers = num_layers
 
     @staticmethod
-    def get_reference_points(spatial_shapes, valid_ratios):
+    def get_reference_points(spatial_shapes, valid_ratios, offset=0.5):
         valid_ratios = valid_ratios.unsqueeze(1)
         reference_points = []
-        for i, (H, W) in enumerate(spatial_shapes.tolist()):
+        for i, (H, W) in enumerate(spatial_shapes):
             ref_y, ref_x = paddle.meshgrid(
-                paddle.linspace(0.5, H - 0.5, H),
-                paddle.linspace(0.5, W - 0.5, W))
+                paddle.arange(end=H) + offset, paddle.arange(end=W) + offset)
             ref_y = ref_y.flatten().unsqueeze(0) / (valid_ratios[:, :, i, 1] *
                                                     H)
             ref_x = ref_x.flatten().unsqueeze(0) / (valid_ratios[:, :, i, 0] *
@@ -247,6 +254,7 @@ class DINOTransformerEncoder(nn.Layer):
     def forward(self,
                 feat,
                 spatial_shapes,
+                level_start_index,
                 feat_mask=None,
                 query_pos_embed=None,
                 valid_ratios=None):
@@ -256,8 +264,8 @@ class DINOTransformerEncoder(nn.Layer):
         reference_points = self.get_reference_points(spatial_shapes,
                                                      valid_ratios)
         for layer in self.layers:
-            feat = layer(feat, reference_points, spatial_shapes, feat_mask,
-                         query_pos_embed)
+            feat = layer(feat, reference_points, spatial_shapes,
+                         level_start_index, feat_mask, query_pos_embed)
 
         return feat
 
@@ -323,6 +331,7 @@ class DINOTransformerDecoderLayer(nn.Layer):
                 reference_points,
                 memory,
                 memory_spatial_shapes,
+                memory_level_start_index,
                 attn_mask=None,
                 memory_mask=None,
                 query_pos_embed=None):
@@ -337,7 +346,7 @@ class DINOTransformerDecoderLayer(nn.Layer):
         # cross attention
         tgt2 = self.cross_attn(
             self.with_pos_embed(tgt, query_pos_embed), reference_points, memory,
-            memory_spatial_shapes, memory_mask)
+            memory_spatial_shapes, memory_level_start_index, memory_mask)
         tgt = tgt + self.dropout2(tgt2)
         tgt = self.norm2(tgt)
 
@@ -371,6 +380,7 @@ class DINOTransformerDecoder(nn.Layer):
                 reference_points,
                 memory,
                 memory_spatial_shapes,
+                memory_level_start_index,
                 bbox_head,
                 score_head,
                 query_pos_head,
@@ -393,8 +403,8 @@ class DINOTransformerDecoder(nn.Layer):
             query_pos_embed = query_pos_head(query_pos_embed)
 
             output = layer(output, reference_points_input, memory,
-                           memory_spatial_shapes, attn_mask, memory_mask,
-                           query_pos_embed)
+                           memory_spatial_shapes, memory_level_start_index,
+                           attn_mask, memory_mask, query_pos_embed)
 
             inter_ref_points = F.sigmoid(bbox_head[i](output) + inverse_sigmoid(
                 reference_points.detach()))
@@ -614,20 +624,26 @@ class DINOTransformer(nn.Layer):
         # [b, l, c]
         lvl_pos_embed_flatten = paddle.concat(lvl_pos_embed_flatten, 1)
         # [num_levels, 2]
-        spatial_shapes = paddle.stack(spatial_shapes)
+        spatial_shapes = paddle.stack(spatial_shapes).astype('int64')
+        # [l], 每一个level的起始index
+        level_start_index = paddle.concat([
+            paddle.zeros(
+                [1], dtype='int64'), spatial_shapes.prod(1).cumsum(0)[:-1]
+        ])
         # [b, num_levels, 2]
         valid_ratios = paddle.stack(valid_ratios, 1)
-        return (feat_flatten, spatial_shapes, mask_flatten,
+        return (feat_flatten, spatial_shapes, level_start_index, mask_flatten,
                 lvl_pos_embed_flatten, valid_ratios)
 
     def forward(self, feats, pad_mask=None, gt_meta=None):
         # input projection and embedding
-        (feat_flatten, spatial_shapes, mask_flatten, lvl_pos_embed_flatten,
+        (feat_flatten, spatial_shapes, level_start_index, mask_flatten,
+         lvl_pos_embed_flatten,
          valid_ratios) = self._get_encoder_input(feats, pad_mask)
 
         # encoder
-        memory = self.encoder(feat_flatten, spatial_shapes, mask_flatten,
-                              lvl_pos_embed_flatten, valid_ratios)
+        memory = self.encoder(feat_flatten, spatial_shapes, level_start_index,
+                              mask_flatten, lvl_pos_embed_flatten, valid_ratios)
 
         # solve hang during distributed training
         memory = memory + self.denoising_class_embed.weight.sum() * 0.
@@ -652,9 +668,9 @@ class DINOTransformer(nn.Layer):
 
         # decoder
         _, dec_out_bboxes, dec_out_logits = self.decoder(
-            target, init_ref_points, memory, spatial_shapes, self.dec_bbox_head,
-            self.dec_score_head, self.query_pos_head, valid_ratios, attn_mask,
-            mask_flatten)
+            target, init_ref_points, memory, spatial_shapes, level_start_index,
+            self.dec_bbox_head, self.dec_score_head, self.query_pos_head,
+            valid_ratios, attn_mask, mask_flatten)
 
         return (dec_out_bboxes, dec_out_logits, enc_topk_bboxes,
                 enc_topk_logits, dn_meta)
@@ -675,7 +691,10 @@ class DINOTransformer(nn.Layer):
                 valid_H, valid_W = h, w
 
             grid_y, grid_x = paddle.meshgrid(
-                paddle.linspace(0, h - 1, h), paddle.linspace(0, w - 1, w))
+                paddle.arange(
+                    end=h, dtype=memory.dtype),
+                paddle.arange(
+                    end=w, dtype=memory.dtype))
             grid_xy = paddle.stack([grid_x, grid_y], -1)
 
             valid_WH = paddle.stack([valid_W, valid_H], -1).reshape(
@@ -687,11 +706,11 @@ class DINOTransformer(nn.Layer):
             idx += h * w
 
         output_anchors = paddle.concat(output_anchors, 1)
-        valid_mask = ((output_anchors > self.eps) &
+        valid_mask = ((output_anchors > self.eps) *
                       (output_anchors < 1 - self.eps)).all(-1, keepdim=True)
         output_anchors = paddle.log(output_anchors / (1 - output_anchors))
         if memory_mask is not None:
-            valid_mask = (valid_mask & (memory_mask.unsqueeze(-1) > 0)) > 0
+            valid_mask = (valid_mask * (memory_mask.unsqueeze(-1) > 0)) > 0
         output_anchors = paddle.where(valid_mask, output_anchors,
                                       paddle.to_tensor(float("inf")))
 
