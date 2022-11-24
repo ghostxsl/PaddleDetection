@@ -1,0 +1,53 @@
+architecture: DETR
+hidden_dim: 256
+use_focal_loss: True
+pretrain_weights: http://10.255.134.13:8091/weights/vit_base_mae_torch_pretrain.pdparams
+
+DETR:
+  backbone: VisionTransformer
+  transformer: DINOTransformer
+  detr_head: DINOHead
+  post_process: DETRBBoxPostProcess
+
+VisionTransformer:
+  patch_size: 16
+  embed_dim: 768
+  depth: 12
+  num_heads: 12
+  mlp_ratio: 4
+  qkv_bias: True
+  drop_rate: 0.0
+  drop_path_rate: 0.1
+  lr_decay_rate: 0.7
+  global_attn_indexes: [2, 5, 8, 11]
+  use_rel_pos: True
+  rel_pos_zero_init: True
+  window_size: 14
+  out_indices: [ 11, ]
+
+DINOTransformer:
+  num_queries: 300
+  position_embed_type: sine
+  num_levels: 4
+  nhead: 8
+  num_encoder_layers: 0
+  num_decoder_layers: 6
+  dim_feedforward: 2048
+  dropout: 0.0
+  activation: relu
+  num_denoising: 100
+  label_noise_ratio: 0.5
+  box_noise_scale: 1.0
+  learnt_init_query: True
+
+DINOHead:
+  loss:
+    name: DINOLoss
+    loss_coeff: {class: 1, bbox: 5, giou: 2}
+    aux_loss: True
+    matcher:
+      name: HungarianMatcher
+      matcher_coeff: {class: 2, bbox: 5, giou: 2}
+
+DETRBBoxPostProcess:
+  num_top_queries: 300

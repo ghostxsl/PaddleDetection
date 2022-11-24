@@ -1,0 +1,28 @@
+_BASE_: [
+  '../datasets/coco_detection.yml',
+  '../runtime.yml',
+  '_base_/dino_vit_mae.yml',
+  '_base_/dino_640_reader.yml',
+]
+
+weights: output/dino_vit_mae_50e_coco/model_final
+find_unused_parameters: True
+log_iter: 100
+snapshot_epoch: 10
+
+epoch: 50
+
+LearningRate:
+  base_lr: 0.0001
+  schedulers:
+  - !PiecewiseDecay
+    gamma: 0.1
+    milestones: [40]
+    use_warmup: false
+
+OptimizerBuilder:
+  clip_grad_by_norm: 0.1
+  regularizer: false
+  optimizer:
+    type: AdamW
+    weight_decay: 0.0001

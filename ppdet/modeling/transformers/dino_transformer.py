@@ -465,15 +465,11 @@ class DINOTransformer(nn.Layer):
         self.num_classes = num_classes
         self.num_queries = num_queries
         self.eps = eps
+        self.num_encoder_layers = num_encoder_layers
 
         # backbone feature projection
         self._build_input_proj_layer(backbone_feat_channels)
 
-        # Transformer module
-        encoder_layer = DINOTransformerEncoderLayer(
-            hidden_dim, nhead, dim_feedforward, dropout, activation, num_levels,
-            num_encoder_points)
-        self.encoder = DINOTransformerEncoder(encoder_layer, num_encoder_layers)
         decoder_layer = DINOTransformerDecoderLayer(
             hidden_dim, nhead, dim_feedforward, dropout, activation, num_levels,
             num_decoder_points)
@@ -555,42 +551,58 @@ class DINOTransformer(nn.Layer):
 
     def _build_input_proj_layer(self, backbone_feat_channels):
         self.input_proj = nn.LayerList()
-        for in_channels in backbone_feat_channels:
-            self.input_proj.append(
-                nn.Sequential(
-                    ('conv', nn.Conv2D(
-                        in_channels, self.hidden_dim, kernel_size=1)),
-                    ('norm', nn.GroupNorm(
-                        32,
-                        self.hidden_dim,
-                        weight_attr=ParamAttr(regularizer=L2Decay(0.0)),
-                        bias_attr=ParamAttr(regularizer=L2Decay(0.0))))))
-        in_channels = backbone_feat_channels[-1]
-        for _ in range(self.num_levels - len(backbone_feat_channels)):
-            self.input_proj.append(
-                nn.Sequential(
-                    ('conv', nn.Conv2D(
-                        in_channels,
-                        self.hidden_dim,
-                        kernel_size=3,
-                        stride=2,
-                        padding=1)), ('norm', nn.GroupNorm(
+        in_channels = backbone_feat_channels[0]
+        # P3
+        self.input_proj.append(
+            nn.Sequential(
+                ('conv', nn.Conv2DTranspose(
+                    in_channels, self.hidden_dim, kernel_size=2, stride=2)), (
+                        'norm', nn.GroupNorm(
                             32,
                             self.hidden_dim,
                             weight_attr=ParamAttr(regularizer=L2Decay(0.0)),
                             bias_attr=ParamAttr(regularizer=L2Decay(0.0))))))
-            in_channels = self.hidden_dim
+        # P4
+        self.input_proj.append(
+            nn.Sequential(
+                ('conv', nn.Conv2D(
+                    in_channels, self.hidden_dim, kernel_size=1)), (
+                        'norm', nn.GroupNorm(
+                            32,
+                            self.hidden_dim,
+                            weight_attr=ParamAttr(regularizer=L2Decay(0.0)),
+                            bias_attr=ParamAttr(regularizer=L2Decay(0.0))))))
+        # P5
+        self.input_proj.append(
+            nn.Sequential(
+                ('conv', nn.Conv2D(
+                    in_channels,
+                    self.hidden_dim,
+                    kernel_size=3,
+                    stride=2,
+                    padding=1)), ('norm', nn.GroupNorm(
+                        32,
+                        self.hidden_dim,
+                        weight_attr=ParamAttr(regularizer=L2Decay(0.0)),
+                        bias_attr=ParamAttr(regularizer=L2Decay(0.0))))))
+        # P6
+        self.input_proj.append(
+            nn.Sequential(
+                ('conv', nn.Conv2D(
+                    self.hidden_dim,
+                    self.hidden_dim,
+                    kernel_size=3,
+                    stride=2,
+                    padding=1)), ('norm', nn.GroupNorm(
+                        32,
+                        self.hidden_dim,
+                        weight_attr=ParamAttr(regularizer=L2Decay(0.0)),
+                        bias_attr=ParamAttr(regularizer=L2Decay(0.0))))))
 
     def _get_encoder_input(self, feats, pad_mask=None):
         # get projection features
-        proj_feats = [self.input_proj[i](feat) for i, feat in enumerate(feats)]
-        if self.num_levels > len(proj_feats):
-            len_srcs = len(proj_feats)
-            for i in range(len_srcs, self.num_levels):
-                if i == len_srcs:
-                    proj_feats.append(self.input_proj[i](feats[-1]))
-                else:
-                    proj_feats.append(self.input_proj[i](proj_feats[-1]))
+        proj_feats = [self.input_proj[i](feats[0]) for i in range(3)]
+        proj_feats.append(self.input_proj[-1](proj_feats[-1]))
 
         # get encoder inputs
         feat_flatten = []
@@ -624,7 +636,8 @@ class DINOTransformer(nn.Layer):
         # [b, l, c]
         lvl_pos_embed_flatten = paddle.concat(lvl_pos_embed_flatten, 1)
         # [num_levels, 2]
-        spatial_shapes = paddle.stack(spatial_shapes).astype('int64')
+        spatial_shapes = paddle.to_tensor(
+            paddle.stack(spatial_shapes).astype('int64'))
         # [l], 每一个level的起始index
         level_start_index = paddle.concat([
             paddle.zeros(
@@ -642,11 +655,10 @@ class DINOTransformer(nn.Layer):
          valid_ratios) = self._get_encoder_input(feats, pad_mask)
 
         # encoder
-        memory = self.encoder(feat_flatten, spatial_shapes, level_start_index,
-                              mask_flatten, lvl_pos_embed_flatten, valid_ratios)
+        memory = feat_flatten + lvl_pos_embed_flatten
 
         # solve hang during distributed training
-        memory = memory + self.denoising_class_embed.weight.sum() * 0.
+        memory = memory + self.denoising_class_embed.weight[0, 0] * 0.
 
         # prepare denoising training
         if self.training:
