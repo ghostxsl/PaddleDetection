@@ -144,9 +144,10 @@ def get_contrastive_denoising_training_group(targets,
     pad_gt_mask = paddle.zeros([bs, max_gt_num])
     for i in range(bs):
         num_gt = num_gts[i]
-        input_query_class[i, :num_gt] = targets["gt_class"][i].squeeze(-1)
-        input_query_bbox[i, :num_gt] = targets["gt_bbox"][i]
-        pad_gt_mask[i, :num_gt] = 1
+        if num_gt > 0:
+            input_query_class[i, :num_gt] = targets["gt_class"][i].squeeze(-1)
+            input_query_bbox[i, :num_gt] = targets["gt_bbox"][i]
+            pad_gt_mask[i, :num_gt] = 1
     # each group has positive and negative queries.
     input_query_class = input_query_class.tile([1, 2 * num_group])
     input_query_bbox = input_query_bbox.tile([1, 2 * num_group, 1])

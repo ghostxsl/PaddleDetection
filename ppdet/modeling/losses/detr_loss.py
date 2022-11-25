@@ -105,7 +105,7 @@ class DETRLoss(nn.Layer):
             return {name_bbox: paddle.zeros([1]), name_giou: paddle.zeros([1])}
         loss = dict()
         if sum(len(a) for a in gt_bbox) == 0:
-            loss[name_bbox] = boxes.sum() * 0.
+            loss[name_bbox] = paddle.to_tensor([0.])
             loss[name_giou] = paddle.to_tensor([0.])
             return loss
 
@@ -128,7 +128,7 @@ class DETRLoss(nn.Layer):
             return {name_mask: paddle.zeros([1]), name_dice: paddle.zeros([1])}
         loss = dict()
         if sum(len(a) for a in gt_mask) == 0:
-            loss[name_mask] = masks.sum() * 0.
+            loss[name_mask] = paddle.to_tensor([0.])
             loss[name_dice] = paddle.to_tensor([0.])
             return loss
 

@@ -325,7 +325,7 @@ class DETRTransformer(nn.Layer):
             src_mask = F.interpolate(src_mask.unsqueeze(0), size=(h, w))[0]
         else:
             src_mask = paddle.ones([bs, h, w])
-        pos_embed = self.position_embedding(src_mask)
+        pos_embed = self.position_embedding(src_mask).flatten(1, 2)
 
         if self.training:
             src_mask = self._convert_attention_mask(src_mask)

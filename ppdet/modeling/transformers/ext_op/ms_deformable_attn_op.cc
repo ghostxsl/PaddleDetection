@@ -21,13 +21,11 @@ MSDeformableAttnCUDAForward(const paddle::Tensor &value,
                             const paddle::Tensor &sampling_locations,
                             const paddle::Tensor &attention_weights);
 
-std::vector<paddle::Tensor>
-MSDeformableAttnCUDABackward(const paddle::Tensor &value,
-                             const paddle::Tensor &value_spatial_shapes,
-                             const paddle::Tensor &value_level_start_index,
-                             const paddle::Tensor &sampling_locations,
-                             const paddle::Tensor &attention_weights,
-                             const paddle::Tensor &grad_out);
+std::vector<paddle::Tensor> MSDeformableAttnCUDABackward(
+    const paddle::Tensor &value, const paddle::Tensor &value_spatial_shapes,
+    const paddle::Tensor &value_level_start_index,
+    const paddle::Tensor &sampling_locations,
+    const paddle::Tensor &attention_weights, const paddle::Tensor &grad_out);
 
 //// CPU not implemented
 
@@ -39,15 +37,6 @@ MSDeformableAttnInferShape(std::vector<int64_t> value_shape,
                            std::vector<int64_t> attention_weights_shape) {
   return {{value_shape[0], sampling_locations_shape[1],
            value_shape[2] * value_shape[3]}};
-}
-
-std::vector<std::vector<int64_t>> MSDeformableAttnInferBackShape(
-    std::vector<int64_t> value_shape,
-    std::vector<int64_t> value_spatial_shapes_shape,
-    std::vector<int64_t> value_level_start_index_shape,
-    std::vector<int64_t> sampling_locations_shape,
-    std::vector<int64_t> attention_weights_shape) {
-  return {value_shape, sampling_locations_shape, attention_weights_shape};
 }
 
 std::vector<paddle::DataType>
@@ -70,7 +59,7 @@ PD_BUILD_OP(ms_deformable_attn)
 PD_BUILD_GRAD_OP(ms_deformable_attn)
     .Inputs({"Value", "SpatialShapes", "LevelIndex", "SamplingLocations",
              "AttentionWeights", paddle::Grad("Out")})
-    .Outputs({paddle::Grad("Value"), paddle::Grad("SamplingLocations"),
+    .Outputs({paddle::Grad("Value"), paddle::Grad("SpatialShapes"),
+              paddle::Grad("LevelIndex"), paddle::Grad("SamplingLocations"),
               paddle::Grad("AttentionWeights")})
-    .SetKernelFn(PD_KERNEL(MSDeformableAttnCUDABackward))
-    .SetInferShapeFn(PD_INFER_SHAPE(MSDeformableAttnInferBackShape));
+    .SetKernelFn(PD_KERNEL(MSDeformableAttnCUDABackward));

@@ -128,7 +128,7 @@ class MSDeformableAttention(nn.Layer):
         value = self.value_proj(value)
         if value_mask is not None:
             value_mask = value_mask.astype(value.dtype).unsqueeze(-1)
-            value *= value_mask
+            value = value * value_mask
         value = value.reshape([bs, Len_v, self.num_heads, self.head_dim])
         sampling_offsets = self.sampling_offsets(query).reshape(
             [bs, Len_q, self.num_heads, self.num_levels, self.num_points, 2])
@@ -138,16 +138,17 @@ class MSDeformableAttention(nn.Layer):
             [bs, Len_q, self.num_heads, self.num_levels, self.num_points])
 
         if reference_points.shape[-1] == 2:
-            offset_normalizer = value_spatial_shapes.flip([1]).reshape(
+            offset_normalizer = value_spatial_shapes.flip(1).reshape(
                 [1, 1, 1, self.num_levels, 1, 2])
             sampling_locations = reference_points.reshape([
                 bs, Len_q, 1, self.num_levels, 1, 2
             ]) + sampling_offsets / offset_normalizer
         elif reference_points.shape[-1] == 4:
+            reference_points = reference_points.reshape(
+                [bs, Len_q, 1, self.num_levels, 1, 4])
             sampling_locations = (
-                reference_points[:, :, None, :, None, :2] + sampling_offsets /
-                self.num_points * reference_points[:, :, None, :, None, 2:] *
-                0.5)
+                reference_points[..., :2] + sampling_offsets / self.num_points *
+                reference_points[..., 2:] * 0.5)
         else:
             raise ValueError(
                 "Last dim of reference_points must be 2 or 4, but get {} instead.".
@@ -382,7 +383,6 @@ class DINOTransformerDecoder(nn.Layer):
                 memory_spatial_shapes,
                 memory_level_start_index,
                 bbox_head,
-                score_head,
                 query_pos_head,
                 valid_ratios=None,
                 attn_mask=None,
@@ -393,10 +393,9 @@ class DINOTransformerDecoder(nn.Layer):
 
         output = tgt
         intermediate = []
-        dec_out_bboxes = []
-        dec_out_logits = []
+        inter_ref_bboxes = []
         for i, layer in enumerate(self.layers):
-            reference_points_input = reference_points.detach().unsqueeze(
+            reference_points_input = reference_points.unsqueeze(
                 2) * valid_ratios.tile([1, 1, 2]).unsqueeze(1)
             query_pos_embed = get_sine_pos_embed(
                 reference_points_input[..., 0, :], self.hidden_dim // 2)
@@ -406,27 +405,19 @@ class DINOTransformerDecoder(nn.Layer):
                            memory_spatial_shapes, memory_level_start_index,
                            attn_mask, memory_mask, query_pos_embed)
 
-            inter_ref_points = F.sigmoid(bbox_head[i](output) + inverse_sigmoid(
-                reference_points.detach()))
-            dec_logit = score_head[i](output)
+            inter_ref_bbox = F.sigmoid(bbox_head[i](output) + inverse_sigmoid(
+                reference_points))
 
             if self.return_intermediate:
                 intermediate.append(self.norm(output))
-                if i == 0:
-                    dec_out_bboxes.append(inter_ref_points)
-                else:
-                    dec_out_bboxes.append(
-                        F.sigmoid(bbox_head[i](output) + inverse_sigmoid(
-                            reference_points)))
-                dec_out_logits.append(dec_logit)
+                inter_ref_bboxes.append(inter_ref_bbox)
 
-            reference_points = inter_ref_points
+            reference_points = inter_ref_bbox.detach()
 
         if self.return_intermediate:
-            return paddle.stack(intermediate), paddle.stack(
-                dec_out_bboxes), paddle.stack(dec_out_logits)
+            return paddle.stack(intermediate), paddle.stack(inter_ref_bboxes)
 
-        return output, reference_points, dec_logit
+        return output, reference_points
 
 
 @register
@@ -465,6 +456,7 @@ class DINOTransformer(nn.Layer):
         self.num_classes = num_classes
         self.num_queries = num_queries
         self.eps = eps
+        self.num_decoder_layers = num_decoder_layers
 
         # backbone feature projection
         self._build_input_proj_layer(backbone_feat_channels)
@@ -609,8 +601,9 @@ class DINOTransformer(nn.Layer):
                 mask = paddle.ones([bs, h, w])
             valid_ratios.append(get_valid_ratio(mask))
             # [b, h*w, c]
-            pos_embed = self.position_embedding(mask)
-            lvl_pos_embed = pos_embed + self.level_embed.weight[i]
+            pos_embed = self.position_embedding(mask).flatten(1, 2)
+            lvl_pos_embed = pos_embed + self.level_embed.weight[i].reshape(
+                [1, 1, -1])
             lvl_pos_embed_flatten.append(lvl_pos_embed)
             if pad_mask is not None:
                 # [b, h*w]
@@ -624,7 +617,8 @@ class DINOTransformer(nn.Layer):
         # [b, l, c]
         lvl_pos_embed_flatten = paddle.concat(lvl_pos_embed_flatten, 1)
         # [num_levels, 2]
-        spatial_shapes = paddle.stack(spatial_shapes).astype('int64')
+        spatial_shapes = paddle.to_tensor(
+            paddle.stack(spatial_shapes).astype('int64'))
         # [l], 每一个level的起始index
         level_start_index = paddle.concat([
             paddle.zeros(
@@ -645,9 +639,6 @@ class DINOTransformer(nn.Layer):
         memory = self.encoder(feat_flatten, spatial_shapes, level_start_index,
                               mask_flatten, lvl_pos_embed_flatten, valid_ratios)
 
-        # solve hang during distributed training
-        memory = memory + self.denoising_class_embed.weight.sum() * 0.
-
         # prepare denoising training
         if self.training:
             denoising_class, denoising_bbox, attn_mask, dn_meta = \
@@ -667,13 +658,30 @@ class DINOTransformer(nn.Layer):
             denoising_bbox)
 
         # decoder
-        _, dec_out_bboxes, dec_out_logits = self.decoder(
+        inter_feats, inter_ref_bboxes = self.decoder(
             target, init_ref_points, memory, spatial_shapes, level_start_index,
-            self.dec_bbox_head, self.dec_score_head, self.query_pos_head,
-            valid_ratios, attn_mask, mask_flatten)
+            self.dec_bbox_head, self.query_pos_head, valid_ratios, attn_mask,
+            mask_flatten)
+        # solve hang during distributed training
+        # inter_feats[0] += self.denoising_class_embed.weight[0, 0] * 0.
 
-        return (dec_out_bboxes, dec_out_logits, enc_topk_bboxes,
-                enc_topk_logits, dn_meta)
+        out_bboxes = []
+        out_logits = []
+        for i in range(self.num_decoder_layers):
+            out_logits.append(self.dec_score_head[i](inter_feats[i]))
+            if i == 0:
+                out_bboxes.append(
+                    F.sigmoid(self.dec_bbox_head[i](inter_feats[i]) +
+                              inverse_sigmoid(init_ref_points)))
+            else:
+                out_bboxes.append(
+                    F.sigmoid(self.dec_bbox_head[i](inter_feats[i]) +
+                              inverse_sigmoid(inter_ref_bboxes[i - 1])))
+
+        out_bboxes = paddle.stack(out_bboxes)
+        out_logits = paddle.stack(out_logits)
+        return (out_bboxes, out_logits, enc_topk_bboxes, enc_topk_logits,
+                dn_meta)
 
     def _get_encoder_output_anchors(self,
                                     memory,
@@ -740,10 +748,11 @@ class DINOTransformer(nn.Layer):
         topk_ind = paddle.stack([batch_ind, topk_ind], axis=-1)
         topk_coords_unact = paddle.gather_nd(enc_outputs_coord_unact,
                                              topk_ind)  # unsigmoided.
-        reference_points = enc_topk_bboxes = F.sigmoid(topk_coords_unact)
+        enc_topk_bboxes = F.sigmoid(topk_coords_unact)
+        reference_points = enc_topk_bboxes.detach()
         if denoising_bbox is not None:
-            reference_points = paddle.concat([denoising_bbox, enc_topk_bboxes],
-                                             1)
+            reference_points = paddle.concat(
+                [denoising_bbox, reference_points], 1)
         enc_topk_logits = paddle.gather_nd(enc_outputs_class, topk_ind)
 
         # extract region features
@@ -754,5 +763,4 @@ class DINOTransformer(nn.Layer):
         if denoising_class is not None:
             target = paddle.concat([denoising_class, target], 1)
 
-        return target, reference_points.detach(
-        ), enc_topk_bboxes, enc_topk_logits
+        return target, reference_points, enc_topk_bboxes, enc_topk_logits

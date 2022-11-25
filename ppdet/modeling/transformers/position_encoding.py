@@ -83,7 +83,7 @@ class PositionEmbedding(nn.Layer):
             pos_y = paddle.stack(
                 (pos_y[:, :, :, 0::2].sin(), pos_y[:, :, :, 1::2].cos()),
                 axis=4).flatten(3)
-            return paddle.concat((pos_y, pos_x), axis=3).flatten(1, 2)
+            return paddle.concat((pos_y, pos_x), axis=3)
         elif self.embed_type == 'learned':
             h, w = mask.shape[-2:]
             i = paddle.arange(w)
@@ -95,6 +95,6 @@ class PositionEmbedding(nn.Layer):
                     x_emb.unsqueeze(0).repeat(h, 1, 1),
                     y_emb.unsqueeze(1).repeat(1, w, 1)
                 ],
-                axis=-1).unsqueeze(0).flatten(1, 2)
+                axis=-1).unsqueeze(0)
         else:
             raise ValueError(f"not supported {self.embed_type}")

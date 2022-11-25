@@ -487,7 +487,7 @@ class DeformableTransformer(nn.Layer):
             else:
                 mask = paddle.ones([bs, h, w])
             valid_ratios.append(get_valid_ratio(mask))
-            pos_embed = self.position_embedding(mask)
+            pos_embed = self.position_embedding(mask).flatten(1, 2)
             lvl_pos_embed = pos_embed + self.level_embed.weight[level]
             lvl_pos_embed_flatten.append(lvl_pos_embed)
             mask = mask.flatten(1)
