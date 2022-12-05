@@ -336,6 +336,7 @@ class DINOTransformer(nn.Layer):
         self.num_levels = num_levels
         self.num_classes = num_classes
         self.num_queries = num_queries
+        self.num_encoder_layers = num_encoder_layers
         self.eps = eps
         self.num_decoder_layers = num_decoder_layers
 
@@ -343,10 +344,12 @@ class DINOTransformer(nn.Layer):
         self._build_input_proj_layer(backbone_feat_channels)
 
         # Transformer module
-        encoder_layer = DINOTransformerEncoderLayer(
-            hidden_dim, nhead, dim_feedforward, dropout, activation, num_levels,
-            num_encoder_points)
-        self.encoder = DINOTransformerEncoder(encoder_layer, num_encoder_layers)
+        if num_encoder_layers > 0:
+            encoder_layer = DINOTransformerEncoderLayer(
+                hidden_dim, nhead, dim_feedforward, dropout, activation,
+                num_levels, num_encoder_points)
+            self.encoder = DINOTransformerEncoder(encoder_layer,
+                                                  num_encoder_layers)
         decoder_layer = DINOTransformerDecoderLayer(
             hidden_dim, nhead, dim_feedforward, dropout, activation, num_levels,
             num_decoder_points)
@@ -389,6 +392,7 @@ class DINOTransformer(nn.Layer):
                 bias_attr=ParamAttr(regularizer=L2Decay(0.0))))
         self.enc_score_head = nn.Linear(hidden_dim, num_classes)
         self.enc_bbox_head = MLP(hidden_dim, hidden_dim, 4, num_layers=3)
+
         # decoder head
         self.dec_score_head = nn.LayerList([
             nn.Linear(hidden_dim, num_classes)
@@ -422,7 +426,6 @@ class DINOTransformer(nn.Layer):
         xavier_uniform_(self.query_pos_head.layers[1].weight)
         for l in self.input_proj:
             xavier_uniform_(l[0].weight)
-            constant_(l[0].bias)
 
     @classmethod
     def from_config(cls, cfg, input_shape):
@@ -434,12 +437,13 @@ class DINOTransformer(nn.Layer):
             self.input_proj.append(
                 nn.Sequential(
                     ('conv', nn.Conv2D(
-                        in_channels, self.hidden_dim, kernel_size=1)),
-                    ('norm', nn.GroupNorm(
-                        32,
+                        in_channels,
                         self.hidden_dim,
-                        weight_attr=ParamAttr(regularizer=L2Decay(0.0)),
-                        bias_attr=ParamAttr(regularizer=L2Decay(0.0))))))
+                        kernel_size=1,
+                        bias_attr=False)), ('norm', nn.BatchNorm2D(
+                            self.hidden_dim,
+                            weight_attr=ParamAttr(regularizer=L2Decay(0.0)),
+                            bias_attr=ParamAttr(regularizer=L2Decay(0.0))))))
         in_channels = backbone_feat_channels[-1]
         for _ in range(self.num_levels - len(backbone_feat_channels)):
             self.input_proj.append(
@@ -449,8 +453,8 @@ class DINOTransformer(nn.Layer):
                         self.hidden_dim,
                         kernel_size=3,
                         stride=2,
-                        padding=1)), ('norm', nn.GroupNorm(
-                            32,
+                        padding=1,
+                        bias_attr=False)), ('norm', nn.BatchNorm2D(
                             self.hidden_dim,
                             weight_attr=ParamAttr(regularizer=L2Decay(0.0)),
                             bias_attr=ParamAttr(regularizer=L2Decay(0.0))))))
@@ -518,8 +522,12 @@ class DINOTransformer(nn.Layer):
          valid_ratios) = self._get_encoder_input(feats, pad_mask)
 
         # encoder
-        memory = self.encoder(feat_flatten, spatial_shapes, level_start_index,
-                              mask_flatten, lvl_pos_embed_flatten, valid_ratios)
+        if self.num_encoder_layers > 0:
+            memory = self.encoder(feat_flatten, spatial_shapes,
+                                  level_start_index, mask_flatten,
+                                  lvl_pos_embed_flatten, valid_ratios)
+        else:
+            memory = feat_flatten
 
         # prepare denoising training
         if self.training:
@@ -541,9 +549,16 @@ class DINOTransformer(nn.Layer):
 
         # decoder
         inter_feats, inter_ref_bboxes = self.decoder(
-            target, init_ref_points, memory, spatial_shapes, level_start_index,
-            self.dec_bbox_head, self.query_pos_head, valid_ratios, attn_mask,
-            mask_flatten)
+            target,
+            init_ref_points,
+            memory,
+            spatial_shapes,
+            level_start_index,
+            self.dec_bbox_head,
+            self.query_pos_head,
+            valid_ratios=valid_ratios,
+            attn_mask=attn_mask,
+            memory_mask=mask_flatten)
         out_bboxes = []
         out_logits = []
         for i in range(self.num_decoder_layers):
@@ -585,8 +600,7 @@ class DINOTransformer(nn.Layer):
                     end=w, dtype=memory.dtype))
             grid_xy = paddle.stack([grid_x, grid_y], -1)
 
-            valid_WH = paddle.stack([valid_W, valid_H], -1).reshape(
-                [-1, 1, 1, 2]).astype(grid_xy.dtype)
+            valid_WH = paddle.concat([valid_W, valid_H]).astype(grid_xy.dtype)
             grid_xy = (grid_xy.unsqueeze(0) + 0.5) / valid_WH
             wh = paddle.ones_like(grid_xy) * grid_size * (2.0**lvl)
             output_anchors.append(
@@ -601,7 +615,6 @@ class DINOTransformer(nn.Layer):
             valid_mask = (valid_mask * (memory_mask.unsqueeze(-1) > 0)) > 0
         output_anchors = paddle.where(valid_mask, output_anchors,
                                       paddle.to_tensor(float("inf")))
-
         memory = paddle.where(valid_mask, memory, paddle.to_tensor(0.))
         output_memory = self.enc_output(memory)
         return output_memory, output_anchors

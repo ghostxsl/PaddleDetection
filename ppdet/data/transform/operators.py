@@ -2509,6 +2509,36 @@ class RandomSelect(BaseOperator):
 
 
 @register_op
+class RandomSelects(BaseOperator):
+    """
+    Randomly choose a transformation between transforms1 and transforms2,
+    and the probability of choosing transforms1 is p.
+
+    The code is based on https://github.com/facebookresearch/detr/blob/main/datasets/transforms.py
+
+    """
+
+    def __init__(self, transforms_list, p=None):
+        super(RandomSelects, self).__init__()
+        if p is not None:
+            assert isinstance(p, (list, tuple))
+            assert len(transforms_list) == len(p)
+        else:
+            assert len(transforms_list) > 0
+        self.transforms = [Compose(t) for t in transforms_list]
+        self.p = p
+
+    def apply(self, sample, context=None):
+        if self.p is None:
+            return random.choice(self.transforms)(sample)
+        else:
+            prob = random.random()
+            for p, t in zip(self.p, self.transforms):
+                if prob <= p:
+                    return t(sample)
+
+
+@register_op
 class RandomShortSideResize(BaseOperator):
     def __init__(self,
                  short_side_sizes,
@@ -2543,22 +2573,23 @@ class RandomShortSideResize(BaseOperator):
 
     def get_size_with_aspect_ratio(self, image_shape, size, max_size=None):
         h, w = image_shape
+        max_clip = False
         if max_size is not None:
             min_original_size = float(min((w, h)))
             max_original_size = float(max((w, h)))
             if max_original_size / min_original_size * size > max_size:
-                size = int(
-                    round(max_size * min_original_size / max_original_size))
+                size = int(max_size * min_original_size / max_original_size)
+                max_clip = True
 
         if (w <= h and w == size) or (h <= w and h == size):
             return (w, h)
 
         if w < h:
             ow = size
-            oh = int(size * h / w)
+            oh = int(size * h / w) if not max_clip else max_size
         else:
             oh = size
-            ow = int(size * w / h)
+            ow = int(size * w / h) if not max_clip else max_size
 
         return (ow, oh)
 
