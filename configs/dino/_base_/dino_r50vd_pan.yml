@@ -62,6 +62,16 @@ DINOHead:
       matcher_coeff: {class: 2, bbox: 5, giou: 2}
       use_pos_only: True
   eval_idx: 5
+  encoder_loss: {class: 1, iou: 2.5, dfl: 0.5}
+  static_assigner_epoch: 400
+  static_assigner:
+    name: ATSSAssigner
+    topk: 9
+  assigner:
+    name: TaskAlignedAssigner
+    topk: 13
+    alpha: 1.0
+    beta: 6.0
 
 DETRBBoxPostProcess:
   num_top_queries: 300

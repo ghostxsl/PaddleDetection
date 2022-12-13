@@ -22,7 +22,8 @@ import paddle.nn.functional as F
 from ppdet.core.workspace import register
 import pycocotools.mask as mask_util
 from ..initializer import linear_init_, constant_
-from ..transformers.utils import inverse_sigmoid
+from ..transformers.utils import inverse_sigmoid, bbox_cxcywh_to_xyxy
+from ..losses.iou_loss import GIoULoss
 
 __all__ = ['DETRHead', 'DeformableDETRHead', 'DINOHead']
 
@@ -366,16 +367,36 @@ class DeformableDETRHead(nn.Layer):
 
 @register
 class DINOHead(nn.Layer):
-    __inject__ = ['loss']
+    __shared__ = ['num_classes']
+    __inject__ = ['loss', 'static_assigner', 'assigner']
 
-    def __init__(self, loss='DINOLoss', eval_idx=5):
+    def __init__(self,
+                 loss='DINOLoss',
+                 num_classes=80,
+                 reg_range=(0, 16),
+                 static_assigner='ATSSAssigner',
+                 assigner='TaskAlignedAssigner',
+                 encoder_loss={'class': 1,
+                               'iou': 2.5,
+                               'dfl': 0.5},
+                 static_assigner_epoch=-1,
+                 eval_idx=5):
         super(DINOHead, self).__init__()
         self.loss = loss
+        self.iou_loss = GIoULoss()
+        self.num_classes = num_classes
+        self.reg_range = reg_range
+        self.reg_channels = reg_range[1] - reg_range[0]
+        self.static_assigner = static_assigner
+        self.assigner = assigner
+        self.encoder_loss = encoder_loss
+        self.static_assigner_epoch = static_assigner_epoch
         self.eval_idx = eval_idx
 
     def forward(self, out_transformer, body_feats, inputs=None):
-        (dec_out_bboxes, dec_out_logits, enc_topk_bboxes, enc_topk_logits,
-         dn_meta) = out_transformer
+        (dec_out_bboxes, dec_out_logits, enc_out_bboxes, enc_out_dist,
+         enc_out_logits, dn_meta, anchors, anchor_points, num_anchors_list,
+         valid_WHs) = out_transformer
         if self.training:
             assert inputs is not None
             assert 'gt_bbox' in inputs and 'gt_class' in inputs
@@ -388,22 +409,162 @@ class DINOHead(nn.Layer):
             else:
                 dn_out_bboxes, dn_out_logits = None, None
 
-            out_bboxes = paddle.concat(
-                [enc_topk_bboxes.unsqueeze(0), dec_out_bboxes])
-            out_logits = paddle.concat(
-                [enc_topk_logits.unsqueeze(0), dec_out_logits])
+            loss = self.get_enc_loss(enc_out_bboxes, enc_out_dist,
+                                     enc_out_logits, anchors, anchor_points,
+                                     num_anchors_list, valid_WHs, inputs)
 
-            return self.loss(
-                out_bboxes,
-                out_logits,
-                inputs['gt_bbox'],
-                inputs['gt_class'],
-                dn_out_bboxes=dn_out_bboxes,
-                dn_out_logits=dn_out_logits,
-                dn_meta=dn_meta)
+            loss.update(
+                self.loss(
+                    dec_out_bboxes,
+                    dec_out_logits,
+                    inputs['gt_bbox'],
+                    inputs['gt_class'],
+                    dn_out_bboxes=dn_out_bboxes,
+                    dn_out_logits=dn_out_logits,
+                    dn_meta=dn_meta))
+            return loss
         else:
             if self.eval_idx >= 0:
                 return (dec_out_bboxes[self.eval_idx],
                         dec_out_logits[self.eval_idx], None)
             else:
-                return (enc_topk_bboxes, enc_topk_logits, None)
+                return (enc_out_bboxes, enc_out_logits, None)
+
+    @staticmethod
+    def _varifocal_loss(pred_score, gt_score, label, alpha=0.75, gamma=2.0):
+        weight = alpha * pred_score.pow(gamma) * (1 - label) + gt_score * label
+        loss = F.binary_cross_entropy(
+            pred_score, gt_score, weight=weight, reduction='sum')
+        return loss
+
+    def _bbox2distance(self, points, bbox):
+        x1y1, x2y2 = paddle.split(bbox, 2, -1)
+        lt = points - x1y1
+        rb = x2y2 - points
+        return paddle.concat([lt, rb], -1).clip(self.reg_range[0],
+                                                self.reg_range[1] - 1 - 0.01)
+
+    def _df_loss(self, pred_dist, target, lower_bound=0):
+        target_left = paddle.cast(target.floor(), 'int64')
+        target_right = target_left + 1
+        weight_left = target_right.astype('float32') - target
+        weight_right = 1 - weight_left
+        loss_left = F.cross_entropy(
+            pred_dist, target_left - lower_bound,
+            reduction='none') * weight_left
+        loss_right = F.cross_entropy(
+            pred_dist, target_right - lower_bound,
+            reduction='none') * weight_right
+        return (loss_left + loss_right).mean(-1, keepdim=True)
+
+    def _bbox_loss(self, pred_bboxes, pred_dist, anchor_points, assigned_labels,
+                   assigned_bboxes, assigned_scores, assigned_scores_sum,
+                   valid_WHs):
+        # select positive samples mask
+        mask_positive = (assigned_labels != self.num_classes)
+        num_pos = mask_positive.sum()
+        # pos/neg loss
+        if num_pos > 0:
+            # l1 + iou
+            bbox_mask = mask_positive.unsqueeze(-1).tile([1, 1, 4])
+            pred_bboxes_pos = paddle.masked_select(pred_bboxes,
+                                                   bbox_mask).reshape([-1, 4])
+            assigned_bboxes_pos = paddle.masked_select(
+                assigned_bboxes, bbox_mask).reshape([-1, 4])
+            bbox_weight = paddle.masked_select(
+                assigned_scores.sum(-1), mask_positive).unsqueeze(-1)
+
+            loss_l1 = F.l1_loss(pred_bboxes_pos, assigned_bboxes_pos)
+
+            loss_iou = self.iou_loss(pred_bboxes_pos,
+                                     assigned_bboxes_pos) * bbox_weight
+            loss_iou = loss_iou.sum() / assigned_scores_sum
+
+            dist_mask = mask_positive.unsqueeze(-1).tile(
+                [1, 1, 4 * self.reg_channels])
+            pred_dist_pos = paddle.masked_select(
+                pred_dist, dist_mask).reshape([-1, 4, self.reg_channels])
+            assigned_ltrb = self._bbox2distance(
+                anchor_points * valid_WHs[:, :2], assigned_bboxes * valid_WHs)
+            assigned_ltrb_pos = paddle.masked_select(
+                assigned_ltrb, bbox_mask).reshape([-1, 4])
+            loss_dfl = self._df_loss(pred_dist_pos, assigned_ltrb_pos,
+                                     self.reg_range[0]) * bbox_weight
+            loss_dfl = loss_dfl.sum() / assigned_scores_sum
+        else:
+            loss_l1 = paddle.zeros([1])
+            loss_iou = pred_bboxes.sum() * 0.
+            loss_dfl = paddle.zeros([1])
+        return loss_l1, loss_iou, loss_dfl
+
+    def get_enc_loss(self, pred_bboxes, pred_dist, pred_logits, anchors,
+                     anchor_points, num_anchors_list, valid_WHs, gt_meta):
+        gt_labels = gt_meta['gt_class']
+        gt_bboxes = gt_meta['gt_bbox']
+        gt_labels, gt_bboxes, pad_gt_mask = self.pad_gt(gt_labels, gt_bboxes)
+        gt_bboxes = bbox_cxcywh_to_xyxy(gt_bboxes)
+        pred_scores = F.sigmoid(pred_logits)
+
+        if gt_meta['epoch_id'] < self.static_assigner_epoch:
+            assigned_labels, assigned_bboxes, assigned_scores = \
+                self.static_assigner(
+                    anchors,
+                    num_anchors_list,
+                    gt_labels,
+                    gt_bboxes,
+                    pad_gt_mask,
+                    bg_index=self.num_classes,
+                    pred_bboxes=pred_bboxes.detach())
+        else:
+            assigned_labels, assigned_bboxes, assigned_scores = \
+                self.assigner(
+                pred_scores.detach(),
+                pred_bboxes.detach(),
+                anchor_points,
+                num_anchors_list,
+                gt_labels,
+                gt_bboxes,
+                pad_gt_mask,
+                bg_index=self.num_classes)
+
+        # cls loss
+        one_hot_label = F.one_hot(assigned_labels,
+                                  self.num_classes + 1)[..., :-1]
+        loss_cls = self._varifocal_loss(pred_scores, assigned_scores,
+                                        one_hot_label)
+
+        assigned_scores_sum = assigned_scores.sum()
+        if paddle.distributed.get_world_size() > 1:
+            paddle.distributed.all_reduce(assigned_scores_sum)
+            assigned_scores_sum /= paddle.distributed.get_world_size()
+        assigned_scores_sum = paddle.clip(assigned_scores_sum, min=1.)
+        loss_cls /= assigned_scores_sum
+
+        loss_l1, loss_iou, loss_dfl = \
+            self._bbox_loss(pred_bboxes, pred_dist, anchor_points,
+                            assigned_labels, assigned_bboxes,
+                            assigned_scores, assigned_scores_sum, valid_WHs)
+
+        return {
+            'enc_cls': self.encoder_loss['class'] * loss_cls,
+            'enc_iou': self.encoder_loss['iou'] * loss_iou,
+            'enc_dfl': self.encoder_loss['dfl'] * loss_dfl,
+            'log_enc_l1': loss_l1
+        }
+
+    def pad_gt(self, gt_labels, gt_bboxes):
+        bs = len(gt_bboxes)
+        num_max_boxes = max([len(s) for s in gt_bboxes])
+        pad_gt_labels = paddle.zeros([bs, num_max_boxes, 1], dtype='int32')
+        pad_gt_bboxes = paddle.zeros([bs, num_max_boxes, 4])
+        pad_gt_mask = paddle.zeros([bs, num_max_boxes, 1])
+        if num_max_boxes == 0:
+            return pad_gt_labels, pad_gt_bboxes, pad_gt_mask
+
+        for i, (label, bbox) in enumerate(zip(gt_labels, gt_bboxes)):
+            num_gt = len(label)
+            if num_gt > 0:
+                pad_gt_labels[i, :num_gt] = label
+                pad_gt_bboxes[i, :num_gt] = bbox
+                pad_gt_mask[i, :num_gt] = 1
+        return pad_gt_labels, pad_gt_bboxes, pad_gt_mask

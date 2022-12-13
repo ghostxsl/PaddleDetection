@@ -33,13 +33,47 @@ from ..layers import MultiHeadAttention
 from .position_encoding import PositionEmbedding
 from ..heads.detr_head import MLP
 from .deformable_transformer import MSDeformableAttention
-from ..initializer import (linear_init_, constant_, xavier_uniform_, normal_,
-                           bias_init_with_prob)
-from .utils import (_get_clones, get_valid_ratio,
+from ..initializer import (linear_init_, constant_, conv_init_, xavier_uniform_,
+                           normal_, bias_init_with_prob)
+from .utils import (_get_clones, get_valid_ratio, bbox_xyxy_to_cxcywh,
                     get_contrastive_denoising_training_group,
                     get_sine_pos_embed, inverse_sigmoid)
+from ..bbox_utils import batch_distance2bbox
 
 __all__ = ['DINOTransformer']
+
+
+class ConvBlock(nn.Layer):
+    def __init__(self,
+                 in_channels,
+                 out_channels,
+                 kernel_size,
+                 stride,
+                 groups=1,
+                 bias=False,
+                 act="relu"):
+        super(ConvBlock, self).__init__()
+        self.conv = nn.Conv2D(
+            in_channels,
+            out_channels,
+            kernel_size=kernel_size,
+            stride=stride,
+            padding=(kernel_size - 1) // 2,
+            groups=groups,
+            bias_attr=bias)
+        self.bn = nn.BatchNorm2D(
+            out_channels,
+            weight_attr=ParamAttr(regularizer=L2Decay(0.0)),
+            bias_attr=ParamAttr(regularizer=L2Decay(0.0)))
+        self.act = getattr(F, act)
+
+        self._init_weights()
+
+    def _init_weights(self):
+        conv_init_(self.conv)
+
+    def forward(self, x):
+        return self.act(self.bn(self.conv(x)))
 
 
 class DINOTransformerEncoderLayer(nn.Layer):
@@ -325,6 +359,8 @@ class DINOTransformer(nn.Layer):
                  label_noise_ratio=0.5,
                  box_noise_scale=1.0,
                  learnt_init_query=True,
+                 reg_range=(0, 16),
+                 eval_size=[640, 640],
                  eps=1e-2):
         super(DINOTransformer, self).__init__()
         assert position_embed_type in ['sine', 'learned'], \
@@ -337,8 +373,11 @@ class DINOTransformer(nn.Layer):
         self.num_classes = num_classes
         self.num_queries = num_queries
         self.num_encoder_layers = num_encoder_layers
+        self.eval_size = eval_size
         self.eps = eps
         self.num_decoder_layers = num_decoder_layers
+        self.reg_range = reg_range
+        self.reg_channels = reg_range[1] - reg_range[0]
 
         # backbone feature projection
         self._build_input_proj_layer(backbone_feat_channels)
@@ -384,14 +423,15 @@ class DINOTransformer(nn.Layer):
                                   num_layers=2)
 
         # encoder head
-        self.enc_output = nn.Sequential(
-            nn.Linear(hidden_dim, hidden_dim),
-            nn.LayerNorm(
-                hidden_dim,
-                weight_attr=ParamAttr(regularizer=L2Decay(0.0)),
-                bias_attr=ParamAttr(regularizer=L2Decay(0.0))))
-        self.enc_score_head = nn.Linear(hidden_dim, num_classes)
-        self.enc_bbox_head = MLP(hidden_dim, hidden_dim, 4, num_layers=3)
+        self.enc_score_head = nn.LayerList()
+        self.enc_bbox_head = nn.LayerList()
+        for _ in range(self.num_levels):
+            self.enc_score_head.append(
+                nn.Conv2D(
+                    hidden_dim, num_classes, 3, padding=1))
+            self.enc_bbox_head.append(
+                nn.Conv2D(
+                    hidden_dim, 4 * self.reg_channels, 3, padding=1))
 
         # decoder head
         self.dec_score_head = nn.LayerList([
@@ -408,18 +448,21 @@ class DINOTransformer(nn.Layer):
     def _reset_parameters(self):
         # class and bbox head init
         bias_cls = bias_init_with_prob(0.01)
-        linear_init_(self.enc_score_head)
-        constant_(self.enc_score_head.bias, bias_cls)
-        constant_(self.enc_bbox_head.layers[-1].weight)
-        constant_(self.enc_bbox_head.layers[-1].bias)
+        # encoder head
+        for cls_, reg_ in zip(self.enc_score_head, self.enc_bbox_head):
+            constant_(cls_.weight)
+            constant_(cls_.bias, bias_cls)
+            constant_(reg_.weight)
+            constant_(reg_.bias, 1.0)
+        self.proj = paddle.linspace(self.reg_range[0], self.reg_range[1] - 1,
+                                    self.reg_channels)
+        # decoder head
         for cls_, reg_ in zip(self.dec_score_head, self.dec_bbox_head):
             linear_init_(cls_)
             constant_(cls_.bias, bias_cls)
             constant_(reg_.layers[-1].weight)
             constant_(reg_.layers[-1].bias)
 
-        linear_init_(self.enc_output[0])
-        xavier_uniform_(self.enc_output[0].weight)
         normal_(self.level_embed.weight)
         xavier_uniform_(self.tgt_embed.weight)
         xavier_uniform_(self.query_pos_head.layers[0].weight)
@@ -477,6 +520,8 @@ class DINOTransformer(nn.Layer):
         lvl_pos_embed_flatten = []
         spatial_shapes = []
         valid_ratios = []
+        enc_out_logits = []
+        enc_out_dist = []
         for i, feat in enumerate(proj_feats):
             bs, _, h, w = paddle.shape(feat)
             spatial_shapes.append(paddle.concat([h, w]))
@@ -494,6 +539,11 @@ class DINOTransformer(nn.Layer):
             if pad_mask is not None:
                 # [b, h*w]
                 mask_flatten.append(mask.flatten(1))
+            # encoder head output
+            enc_out_logits.append(self.enc_score_head[i](feat).flatten(2)
+                                  .transpose([0, 2, 1]))
+            enc_out_dist.append(self.enc_bbox_head[i](feat).flatten(2)
+                                .transpose([0, 2, 1]))
 
         # [b, l, c]
         feat_flatten = paddle.concat(feat_flatten, 1)
@@ -512,14 +562,19 @@ class DINOTransformer(nn.Layer):
         ])
         # [b, num_levels, 2]
         valid_ratios = paddle.stack(valid_ratios, 1)
+        # [b, l, c]
+        enc_out_logits = paddle.concat(enc_out_logits, axis=1)
+        # [b, l, 4]
+        enc_out_dist = paddle.concat(enc_out_dist, axis=1)
         return (feat_flatten, spatial_shapes, level_start_index, mask_flatten,
-                lvl_pos_embed_flatten, valid_ratios)
+                lvl_pos_embed_flatten, valid_ratios, enc_out_logits,
+                enc_out_dist)
 
     def forward(self, feats, pad_mask=None, gt_meta=None):
         # input projection and embedding
         (feat_flatten, spatial_shapes, level_start_index, mask_flatten,
-         lvl_pos_embed_flatten,
-         valid_ratios) = self._get_encoder_input(feats, pad_mask)
+         lvl_pos_embed_flatten, valid_ratios, enc_out_logits,
+         enc_out_dist) = self._get_encoder_input(feats, pad_mask)
 
         # encoder
         if self.num_encoder_layers > 0:
@@ -542,10 +597,11 @@ class DINOTransformer(nn.Layer):
         else:
             denoising_class, denoising_bbox, attn_mask, dn_meta = None, None, None, None
 
-        target, init_ref_points, enc_topk_bboxes, enc_topk_logits = \
+        target, init_ref_points, enc_out_bboxes,\
+        anchors, anchor_points, num_anchors_list, valid_WHs = \
             self._get_decoder_input(
-            memory, spatial_shapes, mask_flatten, denoising_class,
-            denoising_bbox)
+            memory, enc_out_logits, enc_out_dist, spatial_shapes,
+            denoising_class, denoising_bbox)
 
         # decoder
         inter_feats, inter_ref_bboxes = self.decoder(
@@ -575,85 +631,85 @@ class DINOTransformer(nn.Layer):
         out_bboxes = paddle.stack(out_bboxes)
         out_logits = paddle.stack(out_logits)
 
-        return (out_bboxes, out_logits, enc_topk_bboxes, enc_topk_logits,
-                dn_meta)
+        return (out_bboxes, out_logits, enc_out_bboxes, enc_out_dist,
+                enc_out_logits, dn_meta, anchors, anchor_points,
+                num_anchors_list, valid_WHs)
 
     def _get_encoder_output_anchors(self,
-                                    memory,
+                                    enc_out_dist,
                                     spatial_shapes,
-                                    memory_mask=None,
-                                    grid_size=0.05):
-        output_anchors = []
+                                    grid_size=5.0):
+        output_bboxes = []
+        valid_WHs = []
+        anchors = []
+        anchor_points = []
+        num_anchors_list = []
         idx = 0
-        for lvl, (h, w) in enumerate(spatial_shapes):
-            if memory_mask is not None:
-                mask_ = memory_mask[:, idx:idx + h * w].reshape([-1, h, w])
-                valid_H = paddle.sum(mask_[:, :, 0], 1)
-                valid_W = paddle.sum(mask_[:, 0, :], 1)
-            else:
-                valid_H, valid_W = h, w
-
+        for h, w in spatial_shapes:
             grid_y, grid_x = paddle.meshgrid(
                 paddle.arange(
-                    end=h, dtype=memory.dtype),
+                    end=h, dtype=enc_out_dist.dtype),
                 paddle.arange(
-                    end=w, dtype=memory.dtype))
-            grid_xy = paddle.stack([grid_x, grid_y], -1)
+                    end=w, dtype=enc_out_dist.dtype))
+            grid_xy = paddle.stack([grid_x, grid_y], -1).reshape([-1, 2]) + 0.5
+            anchor_points.append(grid_xy / paddle.concat([w, h]))
+            num_anchors_list.append(len(grid_xy))
+            anchor = paddle.concat(
+                [grid_xy - grid_size / 2, grid_xy + grid_size / 2], axis=-1)
+            anchors.append(anchor / paddle.concat([w, h, w, h]))
 
-            valid_WH = paddle.concat([valid_W, valid_H]).astype(grid_xy.dtype)
-            grid_xy = (grid_xy.unsqueeze(0) + 0.5) / valid_WH
-            wh = paddle.ones_like(grid_xy) * grid_size * (2.0**lvl)
-            output_anchors.append(
-                paddle.concat([grid_xy, wh], -1).reshape([-1, h * w, 4]))
+            grid_dist = enc_out_dist[:, idx:idx + h * w]
+            grid_dist = F.softmax(
+                grid_dist.reshape([0, 0, 4, self.reg_channels]))
+            grid_dist = paddle.matmul(grid_dist, self.proj)
+            bboxes = batch_distance2bbox(grid_xy.unsqueeze(0), grid_dist)
+            output_bboxes.append(bboxes)
+
+            valid_WH = paddle.stack([w, h, w, h],
+                                    -1).astype(grid_xy.dtype).tile([h * w, 1])
+            valid_WHs.append(valid_WH)
             idx += h * w
 
-        output_anchors = paddle.concat(output_anchors, 1)
-        valid_mask = ((output_anchors > self.eps) *
-                      (output_anchors < 1 - self.eps)).all(-1, keepdim=True)
-        output_anchors = paddle.log(output_anchors / (1 - output_anchors))
-        if memory_mask is not None:
-            valid_mask = (valid_mask * (memory_mask.unsqueeze(-1) > 0)) > 0
-        output_anchors = paddle.where(valid_mask, output_anchors,
-                                      paddle.to_tensor(float("inf")))
-        memory = paddle.where(valid_mask, memory, paddle.to_tensor(0.))
-        output_memory = self.enc_output(memory)
-        return output_memory, output_anchors
+        output_bboxes = paddle.concat(output_bboxes, 1)
+        valid_WHs = paddle.concat(valid_WHs)
+        output_bboxes = output_bboxes / valid_WHs
+        anchors = paddle.concat(anchors)
+        anchor_points = paddle.concat(anchor_points)
+
+        return output_bboxes, anchors, anchor_points, num_anchors_list, valid_WHs
 
     def _get_decoder_input(self,
                            memory,
+                           enc_out_logits,
+                           enc_out_dist,
                            spatial_shapes,
-                           memory_mask=None,
                            denoising_class=None,
                            denoising_bbox=None):
-        bs, _, _ = memory.shape
+        bs, _, _ = enc_out_logits.shape
         # prepare input for decoder
-        output_memory, output_anchors = self._get_encoder_output_anchors(
-            memory, spatial_shapes, memory_mask)
-        enc_outputs_class = self.enc_score_head(output_memory)
-        enc_outputs_coord_unact = self.enc_bbox_head(
-            output_memory) + output_anchors
+        enc_out_bboxes, anchors, anchor_points,\
+        num_anchors_list, valid_WHs = self._get_encoder_output_anchors(
+            enc_out_dist, spatial_shapes)
 
         _, topk_ind = paddle.topk(
-            enc_outputs_class.max(-1), self.num_queries, axis=1)
+            enc_out_logits.max(-1), self.num_queries, axis=1)
         # extract region proposal boxes
         batch_ind = paddle.arange(end=bs, dtype=topk_ind.dtype)
         batch_ind = batch_ind.unsqueeze(-1).tile([1, self.num_queries])
         topk_ind = paddle.stack([batch_ind, topk_ind], axis=-1)
-        topk_coords_unact = paddle.gather_nd(enc_outputs_coord_unact,
-                                             topk_ind)  # unsigmoided.
-        reference_points = enc_topk_bboxes = F.sigmoid(topk_coords_unact)
+
+        ref_points = paddle.gather_nd(enc_out_bboxes, topk_ind).detach()
+        ref_points = bbox_xyxy_to_cxcywh(ref_points)
         if denoising_bbox is not None:
-            reference_points = paddle.concat([denoising_bbox, enc_topk_bboxes],
-                                             1)
-        enc_topk_logits = paddle.gather_nd(enc_outputs_class, topk_ind)
+            ref_points = paddle.concat([denoising_bbox, ref_points], 1)
 
         # extract region features
         if self.learnt_init_query:
             target = self.tgt_embed.weight.unsqueeze(0).tile([bs, 1, 1])
         else:
-            target = paddle.gather_nd(output_memory, topk_ind).detach()
+            target = paddle.gather_nd(memory, topk_ind).detach()
         if denoising_class is not None:
             target = paddle.concat([denoising_class, target], 1)
 
-        return target, reference_points.detach(
-        ), enc_topk_bboxes, enc_topk_logits
+        return target, ref_points, enc_out_bboxes,\
+               anchors, anchor_points, num_anchors_list, valid_WHs
