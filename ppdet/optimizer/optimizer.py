@@ -286,8 +286,10 @@ class OptimizerBuilder():
 
     def __call__(self, learning_rate, model=None):
         if self.clip_grad_by_norm is not None:
-            grad_clip = nn.ClipGradByGlobalNorm(
-                clip_norm=self.clip_grad_by_norm)
+            # grad_clip = nn.ClipGradByGlobalNorm(
+            #     clip_norm=self.clip_grad_by_norm)
+            from .grad_clip import ClipGradByGlobalNorm
+            grad_clip = ClipGradByGlobalNorm(clip_norm=self.clip_grad_by_norm)
         elif self.clip_grad_by_value is not None:
             var = abs(self.clip_grad_by_value)
             grad_clip = nn.ClipGradByValue(min=-var, max=var)
@@ -348,6 +350,11 @@ class OptimizerBuilder():
         else:
             _params = model.parameters()
             params = [param for param in _params if param.trainable is True]
+
+        if optim_type == 'AdamW':
+            from .adamw import AdamW
+            return AdamW(
+                params, lr=learning_rate, grad_clip=grad_clip, **optim_args)
 
         return op(learning_rate=learning_rate,
                   parameters=params,

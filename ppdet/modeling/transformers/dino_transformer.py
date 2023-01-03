@@ -262,7 +262,6 @@ class DINOTransformerDecoder(nn.Layer):
                 memory_spatial_shapes,
                 memory_level_start_index,
                 bbox_head,
-                score_head,
                 query_pos_head,
                 valid_ratios=None,
                 attn_mask=None,
@@ -338,6 +337,7 @@ class DINOTransformer(nn.Layer):
         self.num_classes = num_classes
         self.num_queries = num_queries
         self.eps = eps
+        self.num_decoder_layers = num_decoder_layers
 
         # backbone feature projection
         self._build_input_proj_layer(backbone_feat_channels)
