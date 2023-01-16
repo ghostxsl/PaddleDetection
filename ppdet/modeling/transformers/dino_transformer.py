@@ -37,7 +37,9 @@ from ..initializer import (linear_init_, constant_, xavier_uniform_, normal_,
                            bias_init_with_prob)
 from .utils import (_get_clones, get_valid_ratio,
                     get_contrastive_denoising_training_group,
-                    get_sine_pos_embed, inverse_sigmoid)
+                    bbox_cxcywh_to_xyxy, get_sine_pos_embed, inverse_sigmoid)
+from ..losses.iou_loss import GIoULoss
+from ..bbox_utils import batch_iou_similarity
 
 __all__ = ['DINOTransformer']
 
@@ -339,6 +341,7 @@ class DINOTransformer(nn.Layer):
         self.num_encoder_layers = num_encoder_layers
         self.eps = eps
         self.num_decoder_layers = num_decoder_layers
+        self.giou_loss = GIoULoss()
 
         # backbone feature projection
         self._build_input_proj_layer(backbone_feat_channels)
@@ -545,8 +548,8 @@ class DINOTransformer(nn.Layer):
 
         target, init_ref_points, enc_out_bboxes, enc_out_logits = \
             self._get_decoder_input(
-            memory, spatial_shapes, mask_flatten, denoising_class,
-            denoising_bbox)
+            memory, spatial_shapes, denoising_class,
+            denoising_bbox, gt_meta)
 
         # decoder
         inter_feats, inter_ref_bboxes = self.decoder(
@@ -581,18 +584,10 @@ class DINOTransformer(nn.Layer):
     def _get_encoder_output_anchors(self,
                                     memory,
                                     spatial_shapes,
-                                    memory_mask=None,
                                     grid_size=0.05):
         output_anchors = []
         idx = 0
         for lvl, (h, w) in enumerate(spatial_shapes):
-            if memory_mask is not None:
-                mask_ = memory_mask[:, idx:idx + h * w].reshape([-1, h, w])
-                valid_H = paddle.sum(mask_[:, :, 0], 1)
-                valid_W = paddle.sum(mask_[:, 0, :], 1)
-            else:
-                valid_H, valid_W = h, w
-
             grid_y, grid_x = paddle.meshgrid(
                 paddle.arange(
                     end=h, dtype=memory.dtype),
@@ -600,41 +595,44 @@ class DINOTransformer(nn.Layer):
                     end=w, dtype=memory.dtype))
             grid_xy = paddle.stack([grid_x, grid_y], -1)
 
-            valid_WH = paddle.concat([valid_W, valid_H]).astype(grid_xy.dtype)
-            grid_xy = (grid_xy.unsqueeze(0) + 0.5) / valid_WH
+            valid_WH = paddle.concat([w, h]).astype(grid_xy.dtype)
+            grid_xy = (grid_xy + 0.5) / valid_WH
             wh = paddle.ones_like(grid_xy) * grid_size * (2.0**lvl)
             output_anchors.append(
-                paddle.concat([grid_xy, wh], -1).reshape([-1, h * w, 4]))
+                paddle.concat([grid_xy, wh], -1).reshape([h * w, 4]))
             idx += h * w
 
-        output_anchors = paddle.concat(output_anchors, 1)
-        valid_mask = ((output_anchors > self.eps) *
-                      (output_anchors < 1 - self.eps)).all(-1, keepdim=True)
+        output_anchors = paddle.concat(output_anchors)
         output_anchors = paddle.log(output_anchors / (1 - output_anchors))
-        if memory_mask is not None:
-            valid_mask = (valid_mask * (memory_mask.unsqueeze(-1) > 0)) > 0
-        output_anchors = paddle.where(valid_mask, output_anchors,
-                                      paddle.to_tensor(float("inf")))
-        memory = paddle.where(valid_mask, memory, paddle.to_tensor(0.))
         output_memory = self.enc_output(memory)
         return output_memory, output_anchors
 
     def _get_decoder_input(self,
                            memory,
                            spatial_shapes,
-                           memory_mask=None,
                            denoising_class=None,
-                           denoising_bbox=None):
+                           denoising_bbox=None,
+                           gt_meta=None):
         bs, _, _ = memory.shape
         # prepare input for decoder
         output_memory, output_anchors = self._get_encoder_output_anchors(
-            memory, spatial_shapes, memory_mask)
+            memory, spatial_shapes)
         enc_out_logits = self.enc_score_head(output_memory)
         enc_out_bboxes = F.sigmoid(
             self.enc_bbox_head(output_memory) + output_anchors)
 
-        _, topk_ind = paddle.topk(
-            enc_out_logits.max(-1), self.num_queries, axis=1)
+        iou_score = None
+        if 'gt_class' in gt_meta and 'gt_bbox' in gt_meta:
+            _, gt_bboxes, _ = self.pad_gt(gt_meta['gt_class'],
+                                          gt_meta['gt_bbox'])
+            if gt_bboxes.shape[1] > 0:
+                iou_score = batch_iou_similarity(
+                    bbox_cxcywh_to_xyxy(enc_out_bboxes),
+                    bbox_cxcywh_to_xyxy(gt_bboxes)).max(-1)
+        class_score = F.sigmoid(enc_out_logits).max(-1)
+        topk_score = class_score if iou_score is None else iou_score
+
+        _, topk_ind = paddle.topk(topk_score, self.num_queries, axis=1)
         # extract region proposal boxes
         batch_ind = paddle.arange(end=bs, dtype=topk_ind.dtype)
         batch_ind = batch_ind.unsqueeze(-1).tile([1, self.num_queries])
@@ -654,3 +652,20 @@ class DINOTransformer(nn.Layer):
             target = paddle.concat([denoising_class, target], 1)
 
         return target, reference_points, enc_out_bboxes, enc_out_logits
+
+    def pad_gt(self, gt_labels, gt_bboxes):
+        bs = len(gt_bboxes)
+        num_max_boxes = max([len(s) for s in gt_bboxes])
+        pad_gt_labels = paddle.zeros([bs, num_max_boxes, 1], dtype='int32')
+        pad_gt_bboxes = paddle.zeros([bs, num_max_boxes, 4])
+        pad_gt_mask = paddle.zeros([bs, num_max_boxes, 1])
+        if num_max_boxes == 0:
+            return pad_gt_labels, pad_gt_bboxes, pad_gt_mask
+
+        for i, (label, bbox) in enumerate(zip(gt_labels, gt_bboxes)):
+            num_gt = len(label)
+            if num_gt > 0:
+                pad_gt_labels[i, :num_gt] = label
+                pad_gt_bboxes[i, :num_gt] = bbox
+                pad_gt_mask[i, :num_gt] = 1
+        return pad_gt_labels, pad_gt_bboxes, pad_gt_mask
