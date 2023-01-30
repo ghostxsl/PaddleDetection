@@ -543,7 +543,7 @@ class DINOTransformer(nn.Layer):
         else:
             denoising_class, denoising_bbox, attn_mask, dn_meta = None, None, None, None
 
-        target, init_ref_points, enc_topk_bboxes, enc_topk_logits = \
+        target, init_ref_points, enc_out_bboxes, enc_out_logits = \
             self._get_decoder_input(
             memory, spatial_shapes, mask_flatten, denoising_class,
             denoising_bbox)
@@ -576,8 +576,7 @@ class DINOTransformer(nn.Layer):
         out_bboxes = paddle.stack(out_bboxes)
         out_logits = paddle.stack(out_logits)
 
-        return (out_bboxes, out_logits, enc_topk_bboxes, enc_topk_logits,
-                dn_meta)
+        return (out_bboxes, out_logits, enc_out_bboxes, enc_out_logits, dn_meta)
 
     def _get_encoder_output_anchors(self,
                                     memory,
@@ -630,23 +629,21 @@ class DINOTransformer(nn.Layer):
         # prepare input for decoder
         output_memory, output_anchors = self._get_encoder_output_anchors(
             memory, spatial_shapes, memory_mask)
-        enc_outputs_class = self.enc_score_head(output_memory)
-        enc_outputs_coord_unact = self.enc_bbox_head(
-            output_memory) + output_anchors
+        enc_out_logits = self.enc_score_head(output_memory)
+        enc_out_bboxes = F.sigmoid(
+            self.enc_bbox_head(output_memory) + output_anchors)
 
         _, topk_ind = paddle.topk(
-            enc_outputs_class.max(-1), self.num_queries, axis=1)
+            enc_out_logits.max(-1), self.num_queries, axis=1)
         # extract region proposal boxes
         batch_ind = paddle.arange(end=bs, dtype=topk_ind.dtype)
         batch_ind = batch_ind.unsqueeze(-1).tile([1, self.num_queries])
         topk_ind = paddle.stack([batch_ind, topk_ind], axis=-1)
-        topk_coords_unact = paddle.gather_nd(enc_outputs_coord_unact,
-                                             topk_ind)  # unsigmoided.
-        reference_points = enc_topk_bboxes = F.sigmoid(topk_coords_unact)
+
+        reference_points = paddle.gather_nd(enc_out_bboxes, topk_ind).detach()
         if denoising_bbox is not None:
-            reference_points = paddle.concat([denoising_bbox, enc_topk_bboxes],
-                                             1)
-        enc_topk_logits = paddle.gather_nd(enc_outputs_class, topk_ind)
+            reference_points = paddle.concat(
+                [denoising_bbox, reference_points], 1)
 
         # extract region features
         if self.learnt_init_query:
@@ -656,5 +653,4 @@ class DINOTransformer(nn.Layer):
         if denoising_class is not None:
             target = paddle.concat([denoising_class, target], 1)
 
-        return target, reference_points.detach(
-        ), enc_topk_bboxes, enc_topk_logits
+        return target, reference_points, enc_out_bboxes, enc_out_logits

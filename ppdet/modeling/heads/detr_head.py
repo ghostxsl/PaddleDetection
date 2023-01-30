@@ -374,7 +374,7 @@ class DINOHead(nn.Layer):
         self.eval_idx = eval_idx
 
     def forward(self, out_transformer, body_feats, inputs=None):
-        (dec_out_bboxes, dec_out_logits, enc_topk_bboxes, enc_topk_logits,
+        (dec_out_bboxes, dec_out_logits, enc_out_bboxes, enc_out_logits,
          dn_meta) = out_transformer
         if self.training:
             assert inputs is not None
@@ -388,16 +388,13 @@ class DINOHead(nn.Layer):
             else:
                 dn_out_bboxes, dn_out_logits = None, None
 
-            out_bboxes = paddle.concat(
-                [enc_topk_bboxes.unsqueeze(0), dec_out_bboxes])
-            out_logits = paddle.concat(
-                [enc_topk_logits.unsqueeze(0), dec_out_logits])
-
             return self.loss(
-                out_bboxes,
-                out_logits,
+                dec_out_bboxes,
+                dec_out_logits,
                 inputs['gt_bbox'],
                 inputs['gt_class'],
+                enc_out_bboxes=enc_out_bboxes.unsqueeze(0),
+                enc_out_logits=enc_out_logits.unsqueeze(0),
                 dn_out_bboxes=dn_out_bboxes,
                 dn_out_logits=dn_out_logits,
                 dn_meta=dn_meta)

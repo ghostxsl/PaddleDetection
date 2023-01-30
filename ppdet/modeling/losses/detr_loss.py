@@ -301,7 +301,8 @@ class DETRLoss(nn.Layer):
                 self._get_loss_mask(masks if masks is not None else None,
                                     gt_mask, match_indices, num_gts, postfix))
 
-        if self.aux_loss:
+        use_aux = kwargs.get("use_aux", True)
+        if self.aux_loss and use_aux:
             if "match_indices" not in kwargs:
                 match_indices = None
             total_loss.update(
@@ -323,12 +324,24 @@ class DINOLoss(DETRLoss):
                 masks=None,
                 gt_mask=None,
                 postfix="",
+                enc_out_bboxes=None,
+                enc_out_logits=None,
                 dn_out_bboxes=None,
                 dn_out_logits=None,
                 dn_meta=None,
                 **kwargs):
+        # dec loss
         total_loss = super(DINOLoss, self).forward(boxes, logits, gt_bbox,
                                                    gt_class)
+        # enc loss
+        enc_loss = super(DINOLoss, self).forward(
+            enc_out_bboxes,
+            enc_out_logits,
+            gt_bbox,
+            gt_class,
+            postfix="_enc",
+            use_aux=False)
+        total_loss.update(enc_loss)
 
         # denoising training loss
         if dn_meta is not None:
