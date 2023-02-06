@@ -21,8 +21,9 @@ import paddle.nn as nn
 import paddle.nn.functional as F
 from ppdet.core.workspace import register
 from .iou_loss import GIoULoss
-from ..transformers import bbox_cxcywh_to_xyxy, sigmoid_focal_loss, varifocal_loss_with_logits
-from ..bbox_utils import bbox_iou
+from ..transformers.utils import (bbox_cxcywh_to_xyxy, sigmoid_focal_loss,
+                                  varifocal_loss_with_logits, pad_gt)
+from ..bbox_utils import bbox_iou, batch_iou_similarity
 
 __all__ = ['DETRLoss', 'DINOLoss']
 
@@ -342,6 +343,20 @@ class DINOLoss(DETRLoss):
             postfix="_enc",
             use_aux=False)
         total_loss.update(enc_loss)
+        # iou loss
+        iou_pred = kwargs.get('enc_iou_logits', None)
+        if iou_pred is not None:
+            _, gt_bboxes, _ = pad_gt(gt_class, gt_bbox)
+            if gt_bboxes.shape[1] > 0:
+                iou_score = batch_iou_similarity(
+                    bbox_cxcywh_to_xyxy(enc_out_bboxes[0]),
+                    bbox_cxcywh_to_xyxy(gt_bboxes)).max(-1)
+                iou_loss = F.binary_cross_entropy_with_logits(iou_pred,
+                                                              iou_score)
+            else:
+                iou_loss = F.binary_cross_entropy_with_logits(
+                    iou_pred, paddle.zeros_like(iou_pred))
+            total_loss["iou_score_loss_enc"] = 5.0 * iou_loss
 
         # denoising training loss
         if dn_meta is not None:

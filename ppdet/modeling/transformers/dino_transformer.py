@@ -35,9 +35,9 @@ from ..heads.detr_head import MLP
 from .deformable_transformer import MSDeformableAttention
 from ..initializer import (linear_init_, constant_, xavier_uniform_, normal_,
                            bias_init_with_prob)
-from .utils import (_get_clones, get_valid_ratio,
-                    get_contrastive_denoising_training_group,
-                    bbox_cxcywh_to_xyxy, get_sine_pos_embed, inverse_sigmoid)
+from .utils import (
+    _get_clones, get_valid_ratio, get_contrastive_denoising_training_group,
+    bbox_cxcywh_to_xyxy, get_sine_pos_embed, inverse_sigmoid, pad_gt)
 from ..losses.iou_loss import GIoULoss
 from ..bbox_utils import batch_iou_similarity
 
@@ -393,7 +393,7 @@ class DINOTransformer(nn.Layer):
                 hidden_dim,
                 weight_attr=ParamAttr(regularizer=L2Decay(0.0)),
                 bias_attr=ParamAttr(regularizer=L2Decay(0.0))))
-        self.enc_score_head = nn.Linear(hidden_dim, num_classes)
+        self.enc_score_head = nn.Linear(hidden_dim, num_classes + 1)
         self.enc_bbox_head = MLP(hidden_dim, hidden_dim, 4, num_layers=3)
 
         # decoder head
@@ -546,7 +546,8 @@ class DINOTransformer(nn.Layer):
         else:
             denoising_class, denoising_bbox, attn_mask, dn_meta = None, None, None, None
 
-        target, init_ref_points, enc_out_bboxes, enc_out_logits = \
+        target, init_ref_points,\
+        enc_out_bboxes, enc_out_logits, enc_iou_logits = \
             self._get_decoder_input(
             memory, spatial_shapes, denoising_class,
             denoising_bbox, gt_meta)
@@ -579,7 +580,8 @@ class DINOTransformer(nn.Layer):
         out_bboxes = paddle.stack(out_bboxes)
         out_logits = paddle.stack(out_logits)
 
-        return (out_bboxes, out_logits, enc_out_bboxes, enc_out_logits, dn_meta)
+        return (out_bboxes, out_logits, enc_out_bboxes, enc_out_logits,
+                enc_iou_logits, dn_meta)
 
     def _get_encoder_output_anchors(self,
                                     memory,
@@ -618,19 +620,21 @@ class DINOTransformer(nn.Layer):
         output_memory, output_anchors = self._get_encoder_output_anchors(
             memory, spatial_shapes)
         enc_out_logits = self.enc_score_head(output_memory)
+        enc_out_logits, enc_iou_logits = paddle.split(
+            enc_out_logits, [self.num_classes, 1], axis=-1)
+        enc_iou_logits = enc_iou_logits.squeeze(-1)
         enc_out_bboxes = F.sigmoid(
             self.enc_bbox_head(output_memory) + output_anchors)
 
         iou_score = None
         if 'gt_class' in gt_meta and 'gt_bbox' in gt_meta:
-            _, gt_bboxes, _ = self.pad_gt(gt_meta['gt_class'],
-                                          gt_meta['gt_bbox'])
+            _, gt_bboxes, _ = pad_gt(gt_meta['gt_class'], gt_meta['gt_bbox'])
             if gt_bboxes.shape[1] > 0:
                 iou_score = batch_iou_similarity(
                     bbox_cxcywh_to_xyxy(enc_out_bboxes),
                     bbox_cxcywh_to_xyxy(gt_bboxes)).max(-1)
-        class_score = F.sigmoid(enc_out_logits).max(-1)
-        topk_score = class_score if iou_score is None else iou_score
+        iou_pred_score = F.sigmoid(enc_iou_logits)
+        topk_score = iou_pred_score if iou_score is None else iou_score
 
         _, topk_ind = paddle.topk(topk_score, self.num_queries, axis=1)
         # extract region proposal boxes
@@ -651,21 +655,4 @@ class DINOTransformer(nn.Layer):
         if denoising_class is not None:
             target = paddle.concat([denoising_class, target], 1)
 
-        return target, reference_points, enc_out_bboxes, enc_out_logits
-
-    def pad_gt(self, gt_labels, gt_bboxes):
-        bs = len(gt_bboxes)
-        num_max_boxes = max([len(s) for s in gt_bboxes])
-        pad_gt_labels = paddle.zeros([bs, num_max_boxes, 1], dtype='int32')
-        pad_gt_bboxes = paddle.zeros([bs, num_max_boxes, 4])
-        pad_gt_mask = paddle.zeros([bs, num_max_boxes, 1])
-        if num_max_boxes == 0:
-            return pad_gt_labels, pad_gt_bboxes, pad_gt_mask
-
-        for i, (label, bbox) in enumerate(zip(gt_labels, gt_bboxes)):
-            num_gt = len(label)
-            if num_gt > 0:
-                pad_gt_labels[i, :num_gt] = label
-                pad_gt_bboxes[i, :num_gt] = bbox
-                pad_gt_mask[i, :num_gt] = 1
-        return pad_gt_labels, pad_gt_bboxes, pad_gt_mask
+        return target, reference_points, enc_out_bboxes, enc_out_logits, enc_iou_logits

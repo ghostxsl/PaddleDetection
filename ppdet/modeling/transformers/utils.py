@@ -276,3 +276,21 @@ def varifocal_loss_with_logits(pred_logits,
     loss = F.binary_cross_entropy_with_logits(
         pred_logits, gt_score, weight=weight, reduction='none')
     return loss.mean(1).sum() / normalizer
+
+
+def pad_gt(gt_labels, gt_bboxes):
+    bs = len(gt_bboxes)
+    num_max_boxes = max([len(s) for s in gt_bboxes])
+    pad_gt_labels = paddle.zeros([bs, num_max_boxes, 1], dtype='int32')
+    pad_gt_bboxes = paddle.zeros([bs, num_max_boxes, 4])
+    pad_gt_mask = paddle.zeros([bs, num_max_boxes, 1])
+    if num_max_boxes == 0:
+        return pad_gt_labels, pad_gt_bboxes, pad_gt_mask
+
+    for i, (label, bbox) in enumerate(zip(gt_labels, gt_bboxes)):
+        num_gt = len(label)
+        if num_gt > 0:
+            pad_gt_labels[i, :num_gt] = label
+            pad_gt_bboxes[i, :num_gt] = bbox
+            pad_gt_mask[i, :num_gt] = 1
+    return pad_gt_labels, pad_gt_bboxes, pad_gt_mask
