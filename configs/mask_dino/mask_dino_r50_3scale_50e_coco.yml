@@ -1,0 +1,11 @@
+_BASE_: [
+  '../datasets/coco_instance.yml',
+  '../runtime.yml',
+  '_base_/optimizer_50e.yml',
+  '_base_/mask_dino_r50.yml',
+  '_base_/mask_dino_reader.yml',
+]
+
+weights: output/mask_dino_r50_3scale_50e_coco/model_final
+find_unused_parameters: True
+log_iter: 200
