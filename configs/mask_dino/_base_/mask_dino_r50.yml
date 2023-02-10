@@ -1,0 +1,54 @@
+architecture: DETR
+pretrain_weights: https://paddledet.bj.bcebos.com/models/pretrained/ResNet50_vb_normal_pretrained.pdparams
+hidden_dim: 256
+use_focal_loss: True
+with_mask: True
+num_sample_points: 12544
+
+
+DETR:
+  backbone: ResNet
+  transformer: MaskDINO
+  detr_head: MaskDINOHead
+  post_process: DETRPostProcess
+
+ResNet:
+  # index 0 stands for res2
+  depth: 50
+  norm_type: bn
+  freeze_at: 0
+  return_idx: [0, 1, 2, 3]
+  lr_mult_list: [0.1, 0.1, 0.1, 0.1]
+  num_stages: 4
+  freeze_stem_only: True
+
+MaskDINO:
+  num_queries: 300
+  position_embed_type: sine
+  num_levels: 3
+  nhead: 8
+  num_encoder_layers: 6
+  num_decoder_layers: 9
+  enc_dim_feedforward: 1024
+  dec_dim_feedforward: 2048
+  dropout: 0.0
+  activation: relu
+  num_denoising: 100
+  label_noise_ratio: 0.4
+  box_noise_scale: 0.4
+  learnt_init_query: False
+  mask_enhanced: True
+
+MaskDINOHead:
+  loss:
+    name: MaskDINOLoss
+    loss_coeff: {class: 4, bbox: 5, giou: 2, mask: 5, dice: 5}
+    aux_loss: True
+    oversample_ratio: 3.0
+    important_sample_ratio: 0.75
+    matcher:
+      name: HungarianMatcher
+      matcher_coeff: {class: 4, bbox: 5, giou: 2, mask: 5, dice: 5}
+
+DETRPostProcess:
+  use_avg_mask_score: True

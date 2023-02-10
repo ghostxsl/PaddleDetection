@@ -167,14 +167,16 @@ class DeformableTransformerEncoderLayer(nn.Layer):
                  activation="relu",
                  n_levels=4,
                  n_points=4,
+                 attn_lr_mult=0.1,
                  weight_attr=None,
                  bias_attr=None):
         super(DeformableTransformerEncoderLayer, self).__init__()
         # self attention
         self.self_attn = MSDeformableAttention(d_model, n_head, n_levels,
-                                               n_points)
+                                               n_points, attn_lr_mult)
         self.dropout1 = nn.Dropout(dropout)
-        self.norm1 = nn.LayerNorm(d_model)
+        self.norm1 = nn.LayerNorm(
+            d_model, weight_attr=weight_attr, bias_attr=bias_attr)
         # ffn
         self.linear1 = nn.Linear(d_model, dim_feedforward, weight_attr,
                                  bias_attr)
@@ -183,7 +185,8 @@ class DeformableTransformerEncoderLayer(nn.Layer):
         self.linear2 = nn.Linear(dim_feedforward, d_model, weight_attr,
                                  bias_attr)
         self.dropout3 = nn.Dropout(dropout)
-        self.norm2 = nn.LayerNorm(d_model)
+        self.norm2 = nn.LayerNorm(
+            d_model, weight_attr=weight_attr, bias_attr=bias_attr)
         self._reset_parameters()
 
     def _reset_parameters(self):
@@ -207,10 +210,10 @@ class DeformableTransformerEncoderLayer(nn.Layer):
                 spatial_shapes,
                 level_start_index,
                 src_mask=None,
-                pos_embed=None):
+                query_pos_embed=None):
         # self attention
         src2 = self.self_attn(
-            self.with_pos_embed(src, pos_embed), reference_points, src,
+            self.with_pos_embed(src, query_pos_embed), reference_points, src,
             spatial_shapes, level_start_index, src_mask)
         src = src + self.dropout1(src2)
         src = self.norm1(src)
@@ -243,23 +246,22 @@ class DeformableTransformerEncoder(nn.Layer):
         return reference_points
 
     def forward(self,
-                src,
+                feat,
                 spatial_shapes,
                 level_start_index,
-                src_mask=None,
-                pos_embed=None,
+                feat_mask=None,
+                query_pos_embed=None,
                 valid_ratios=None):
-        output = src
         if valid_ratios is None:
             valid_ratios = paddle.ones(
-                [src.shape[0], spatial_shapes.shape[0], 2])
+                [feat.shape[0], spatial_shapes.shape[0], 2])
         reference_points = self.get_reference_points(spatial_shapes,
                                                      valid_ratios)
         for layer in self.layers:
-            output = layer(output, reference_points, spatial_shapes,
-                           level_start_index, src_mask, pos_embed)
+            feat = layer(feat, reference_points, spatial_shapes,
+                         level_start_index, feat_mask, query_pos_embed)
 
-        return output
+        return feat
 
 
 class DeformableTransformerDecoderLayer(nn.Layer):
@@ -378,7 +380,7 @@ class DeformableTransformer(nn.Layer):
                  num_queries=300,
                  position_embed_type='sine',
                  return_intermediate_dec=True,
-                 backbone_num_channels=[512, 1024, 2048],
+                 in_feats_channel=[512, 1024, 2048],
                  num_feature_levels=4,
                  num_encoder_points=4,
                  num_decoder_points=4,
@@ -389,13 +391,11 @@ class DeformableTransformer(nn.Layer):
                  dim_feedforward=1024,
                  dropout=0.1,
                  activation="relu",
-                 lr_mult=0.1,
-                 weight_attr=None,
-                 bias_attr=None):
+                 lr_mult=0.1):
         super(DeformableTransformer, self).__init__()
         assert position_embed_type in ['sine', 'learned'], \
             f'ValueError: position_embed_type not supported {position_embed_type}!'
-        assert len(backbone_num_channels) <= num_feature_levels
+        assert len(in_feats_channel) <= num_feature_levels
 
         self.hidden_dim = hidden_dim
         self.nhead = nhead
@@ -403,13 +403,13 @@ class DeformableTransformer(nn.Layer):
 
         encoder_layer = DeformableTransformerEncoderLayer(
             hidden_dim, nhead, dim_feedforward, dropout, activation,
-            num_feature_levels, num_encoder_points, weight_attr, bias_attr)
+            num_feature_levels, num_encoder_points)
         self.encoder = DeformableTransformerEncoder(encoder_layer,
                                                     num_encoder_layers)
 
         decoder_layer = DeformableTransformerDecoderLayer(
             hidden_dim, nhead, dim_feedforward, dropout, activation,
-            num_feature_levels, num_decoder_points, weight_attr, bias_attr)
+            num_feature_levels, num_decoder_points)
         self.decoder = DeformableTransformerDecoder(
             decoder_layer, num_decoder_layers, return_intermediate_dec)
 
@@ -424,18 +424,14 @@ class DeformableTransformer(nn.Layer):
             bias_attr=ParamAttr(learning_rate=lr_mult))
 
         self.input_proj = nn.LayerList()
-        for in_channels in backbone_num_channels:
+        for in_channels in in_feats_channel:
             self.input_proj.append(
                 nn.Sequential(
                     nn.Conv2D(
-                        in_channels,
-                        hidden_dim,
-                        kernel_size=1,
-                        weight_attr=weight_attr,
-                        bias_attr=bias_attr),
+                        in_channels, hidden_dim, kernel_size=1),
                     nn.GroupNorm(32, hidden_dim)))
-        in_channels = backbone_num_channels[-1]
-        for _ in range(num_feature_levels - len(backbone_num_channels)):
+        in_channels = in_feats_channel[-1]
+        for _ in range(num_feature_levels - len(in_feats_channel)):
             self.input_proj.append(
                 nn.Sequential(
                     nn.Conv2D(
@@ -443,9 +439,7 @@ class DeformableTransformer(nn.Layer):
                         hidden_dim,
                         kernel_size=3,
                         stride=2,
-                        padding=1,
-                        weight_attr=weight_attr,
-                        bias_attr=bias_attr),
+                        padding=1),
                     nn.GroupNorm(32, hidden_dim)))
             in_channels = hidden_dim
 
@@ -469,7 +463,7 @@ class DeformableTransformer(nn.Layer):
 
     @classmethod
     def from_config(cls, cfg, input_shape):
-        return {'backbone_num_channels': [i.channels for i in input_shape], }
+        return {'in_feats_channel': [i.channels for i in input_shape], }
 
     def forward(self, src_feats, src_mask=None, *args, **kwargs):
         srcs = []

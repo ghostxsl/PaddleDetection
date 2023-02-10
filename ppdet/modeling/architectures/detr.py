@@ -28,19 +28,21 @@ __all__ = ['DETR']
 class DETR(BaseArch):
     __category__ = 'architecture'
     __inject__ = ['post_process']
-    __shared__ = ['exclude_post_process']
+    __shared__ = ['with_mask', 'exclude_post_process']
 
     def __init__(self,
                  backbone,
                  transformer='DETRTransformer',
                  detr_head='DETRHead',
-                 post_process='DETRBBoxPostProcess',
+                 post_process='DETRPostProcess',
+                 with_mask=False,
                  exclude_post_process=False):
         super(DETR, self).__init__()
         self.backbone = backbone
         self.transformer = transformer
         self.detr_head = detr_head
         self.post_process = post_process
+        self.with_mask = with_mask
         self.exclude_post_process = exclude_post_process
 
     @classmethod
@@ -69,7 +71,7 @@ class DETR(BaseArch):
         body_feats = self.backbone(self.inputs)
 
         # Transformer
-        pad_mask = self.inputs['pad_mask'] if self.training else None
+        pad_mask = self.inputs.get('pad_mask', None)
         out_transformer = self.transformer(body_feats, pad_mask, self.inputs)
 
         # DETR Head
@@ -87,9 +89,11 @@ class DETR(BaseArch):
                 bboxes, logits, masks = preds
                 return bboxes, logits
             else:
-                bbox, bbox_num = self.post_process(
+                bbox, bbox_num, mask = self.post_process(
                     preds, self.inputs['im_shape'], self.inputs['scale_factor'])
                 output = {'bbox': bbox, 'bbox_num': bbox_num}
+                if self.with_mask:
+                    output['mask'] = mask
                 return output
 
     def get_loss(self):
