@@ -401,7 +401,7 @@ class MaskDINO(nn.Layer):
         lvl_pos_embed_flatten = []
         spatial_shapes = []
         valid_ratios = []
-        for i, feat in enumerate(proj_feats):
+        for i, feat in enumerate(proj_feats[::-1]):
             bs, _, h, w = paddle.shape(feat)
             spatial_shapes.append(paddle.concat([h, w]))
             # [b,c,h,w] -> [b,h*w,c]
@@ -466,6 +466,15 @@ class MaskDINO(nn.Layer):
         else:
             denoising_class, denoising_bbox_unact, attn_mask, dn_meta = None, None, None, None
 
+        memory = memory.split(
+            spatial_shapes.prod(1).split(self.num_levels), axis=1)
+        memory = paddle.concat(memory[::-1], axis=1)
+        spatial_shapes = spatial_shapes.flip(0)
+        level_start_index = paddle.concat([
+            paddle.zeros(
+                [1], dtype='int64'), spatial_shapes.prod(1).cumsum(0)[:-1]
+        ])
+
         target, init_ref_points_unact, enc_out, init_out = \
             self._get_decoder_input(
             memory, mask_feat, spatial_shapes, mask_flatten, denoising_class,
@@ -505,8 +514,8 @@ class MaskDINO(nn.Layer):
 
     def _get_encoder_mask_feature(self, in_feat, memory, spatial_shapes):
         memory_feat0 = memory.split(
-            spatial_shapes.prod(1).split(self.num_levels), axis=1)[0]
-        h, w = spatial_shapes[0]
+            spatial_shapes.prod(1).split(self.num_levels), axis=1)[-1]
+        h, w = spatial_shapes[-1]
         memory_feat0 = memory_feat0.reshape(
             [0, h, w, self.hidden_dim]).transpose([0, 3, 1, 2])
         out = self.enc_mask_lateral(in_feat) + F.interpolate(

@@ -4,7 +4,7 @@ TrainReader:
     - Decode: {}
     - RandomFlip: {prob: 0.5}
     - Poly2Mask: {del_poly: True}
-    - RandomScaledCrop: {target_size: [1024, 1024], scale_range: [0.1, 2.0], fill_value: [123.675, 116.28, 103.53], return_pad_mask: True}
+    - RandomScaledCrop: {target_size: [1024, 1024], scale_range: [0.1, 2.0], fill_value: [123.675, 116.28, 103.53], return_pad_mask: False}
     - NormalizeImage: {is_scale: true, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
     - NormalizeBox: {}
     - BboxXYXY2XYWH: {}
@@ -23,7 +23,7 @@ EvalReader:
     - NormalizeImage: {is_scale: true, mean: [0.485, 0.456, 0.406], std: [0.229, 0.224, 0.225]}
     - Permute: {}
   batch_transforms:
-    - PadMaskBatch: {pad_to_stride: 32, return_pad_mask: True}
+    - PadMaskBatch: {pad_to_stride: 32, return_pad_mask: False}
   batch_size: 1
 
 

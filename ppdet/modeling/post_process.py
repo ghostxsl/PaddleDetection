@@ -492,8 +492,12 @@ class DETRPostProcess(object):
         bbox_pred = bbox_cxcywh_to_xyxy(bboxes)
         origin_shape = paddle.floor(im_shape / scale_factor + 0.5)
         img_h, img_w = paddle.split(origin_shape, 2, axis=-1)
+        h_1, w_1 = im_shape[0]
+        h_0, w_0 = masks.shape[-2:]
+        img_h_ = h_0 * 4 / h_1 * img_h
+        img_w_ = w_0 * 4 / w_1 * img_w
         origin_shape = paddle.concat(
-            [img_w, img_h, img_w, img_h], axis=-1).reshape([-1, 1, 4])
+            [img_w_, img_h_, img_w_, img_h_], axis=-1).reshape([-1, 1, 4])
         bbox_pred *= origin_shape
 
         scores = F.sigmoid(logits) if self.use_focal_loss else F.softmax(
