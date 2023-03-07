@@ -192,11 +192,11 @@ class DETRLoss(nn.Layer):
         elif self.use_same_match:
             match_indices = self.matcher(
                 boxes[self.same_match_ind],
-             logits[self.same_match_ind],
-             gt_bbox,
-             gt_class,
-             masks=masks[self.same_match_ind] if masks is not None else None,
-             gt_mask=gt_mask)
+                logits[self.same_match_ind],
+                gt_bbox,
+                gt_class,
+                masks=masks[self.same_match_ind] if masks is not None else None,
+                gt_mask=gt_mask)
         for i, (aux_boxes, aux_logits) in enumerate(zip(boxes, logits)):
             aux_masks = masks[i] if masks is not None else None
             if not self.use_same_match and dn_match_indices is None:
@@ -294,7 +294,7 @@ class DETRLoss(nn.Layer):
         if self.use_vfl:
             if sum(len(a) for a in gt_bbox) > 0:
                 src_bbox, target_bbox = self._get_src_target_assign(
-                    boxes[-1].detach(), gt_bbox, match_indices)
+                    boxes.detach(), gt_bbox, match_indices)
                 iou_score = bbox_iou(
                     bbox_cxcywh_to_xyxy(src_bbox).split(4, -1),
                     bbox_cxcywh_to_xyxy(target_bbox).split(4, -1))

@@ -39,6 +39,76 @@ from .utils import (_get_clones, get_sine_pos_embed,
 __all__ = ['PPDETRTransformer']
 
 
+class PPMSDeformableAttention(MSDeformableAttention):
+    def forward(self,
+                query,
+                reference_points,
+                value,
+                value_spatial_shapes,
+                value_level_start_index,
+                value_mask=None):
+        """
+        Args:
+            query (Tensor): [bs, query_length, C]
+            reference_points (Tensor): [bs, query_length, n_levels, 2], range in [0, 1], top-left (0,0),
+                bottom-right (1, 1), including padding area
+            value (Tensor): [bs, value_length, C]
+            value_spatial_shapes (List): [n_levels, 2], [(H_0, W_0), (H_1, W_1), ..., (H_{L-1}, W_{L-1})]
+            value_level_start_index (List): [n_levels], [0, H_0*W_0, H_0*W_0+H_1*W_1, ...]
+            value_mask (Tensor): [bs, value_length], True for non-padding elements, False for padding elements
+
+        Returns:
+            output (Tensor): [bs, Length_{query}, C]
+        """
+        bs, Len_q = query.shape[:2]
+        Len_v = value.shape[1]
+
+        value = self.value_proj(value)
+        if value_mask is not None:
+            value_mask = value_mask.astype(value.dtype).unsqueeze(-1)
+            value *= value_mask
+        value = value.reshape([bs, Len_v, self.num_heads, self.head_dim])
+
+        sampling_offsets = self.sampling_offsets(query).reshape(
+            [bs, Len_q, self.num_heads, self.num_levels, self.num_points, 2])
+        attention_weights = self.attention_weights(query).reshape(
+            [bs, Len_q, self.num_heads, self.num_levels * self.num_points])
+        attention_weights = F.softmax(attention_weights).reshape(
+            [bs, Len_q, self.num_heads, self.num_levels, self.num_points])
+
+        if reference_points.shape[-1] == 2:
+            offset_normalizer = paddle.to_tensor(value_spatial_shapes)
+            offset_normalizer = offset_normalizer.flip([1]).reshape(
+                [1, 1, 1, self.num_levels, 1, 2])
+            sampling_locations = reference_points.reshape([
+                bs, Len_q, 1, self.num_levels, 1, 2
+            ]) + sampling_offsets / offset_normalizer
+        elif reference_points.shape[-1] == 4:
+            sampling_locations = (
+                reference_points[:, :, None, :, None, :2] + sampling_offsets /
+                self.num_points * reference_points[:, :, None, :, None, 2:] *
+                0.5)
+        else:
+            raise ValueError(
+                "Last dim of reference_points must be 2 or 4, but get {} instead.".
+                format(reference_points.shape[-1]))
+
+        if not isinstance(query, paddle.Tensor):
+            from ppdet.modeling.transformers.utils import deformable_attention_core_func
+            output = deformable_attention_core_func(
+                value, value_spatial_shapes, value_level_start_index,
+                sampling_locations, attention_weights)
+        else:
+            value_spatial_shapes = paddle.to_tensor(value_spatial_shapes)
+            value_level_start_index = paddle.to_tensor(value_level_start_index)
+            output = self.ms_deformable_attn_core(
+                value, value_spatial_shapes, value_level_start_index,
+                sampling_locations, attention_weights)
+        output = self.output_proj(output)
+
+        return output
+
+
 class TransformerDecoderLayer(nn.Layer):
     def __init__(self,
                  d_model=256,
@@ -61,8 +131,8 @@ class TransformerDecoderLayer(nn.Layer):
             bias_attr=ParamAttr(regularizer=L2Decay(0.0)))
 
         # cross attention
-        self.cross_attn = MSDeformableAttention(d_model, n_head, n_levels,
-                                                n_points, 1.0)
+        self.cross_attn = PPMSDeformableAttention(d_model, n_head, n_levels,
+                                                  n_points, 1.0)
         self.dropout2 = nn.Dropout(dropout)
         self.norm2 = nn.LayerNorm(
             d_model,
@@ -151,9 +221,9 @@ class TransformerDecoder(nn.Layer):
         output = tgt
         dec_out_bboxes = []
         dec_out_logits = []
-        ref_points = F.sigmoid(ref_points_unact)
+        ref_points_detach = F.sigmoid(ref_points_unact)
         for i, layer in enumerate(self.layers):
-            ref_points_input = ref_points.detach().unsqueeze(2)
+            ref_points_input = ref_points_detach.unsqueeze(2)
             query_pos_embed = get_sine_pos_embed(ref_points_input[..., 0, :],
                                                  self.hidden_dim // 2)
             query_pos_embed = query_pos_head(query_pos_embed)
@@ -162,23 +232,24 @@ class TransformerDecoder(nn.Layer):
                            memory_spatial_shapes, memory_level_start_index,
                            attn_mask, memory_mask, query_pos_embed)
 
-            inter_ref_bbox = F.sigmoid(bbox_head[i](output) + inverse_sigmoid(
-                ref_points.detach()))
+            ref_points_detach = F.sigmoid(bbox_head[i](output) +
+                                          inverse_sigmoid(ref_points_detach))
 
             if self.training:
                 dec_out_logits.append(score_head[i](output))
                 if i == 0:
-                    dec_out_bboxes.append(inter_ref_bbox)
+                    dec_out_bboxes.append(ref_points_detach)
                 else:
                     dec_out_bboxes.append(
                         F.sigmoid(bbox_head[i](output) + inverse_sigmoid(
                             ref_points)))
-            else:
-                if i == len(self.layers) - 1:
-                    dec_out_bboxes.append(inter_ref_bbox)
-                    dec_out_logits.append(score_head[i](output))
+            elif i == len(self.layers) - 1:
+                dec_out_logits.append(score_head[i](output))
+                dec_out_bboxes.append(ref_points_detach)
 
-            ref_points = inter_ref_bbox
+            ref_points = ref_points_detach
+            if self.training:
+                ref_points_detach = ref_points_detach.detach()
 
         return paddle.stack(dec_out_bboxes), paddle.stack(dec_out_logits)
 
@@ -190,11 +261,11 @@ class PPDETRTransformer(nn.Layer):
     def __init__(self,
                  num_classes=80,
                  hidden_dim=256,
-                 num_queries=900,
+                 num_queries=300,
                  position_embed_type='sine',
                  backbone_feat_channels=[512, 1024, 2048],
                  feat_strides=[8, 16, 32],
-                 num_levels=4,
+                 num_levels=3,
                  num_decoder_points=4,
                  nhead=8,
                  num_decoder_layers=6,
@@ -348,22 +419,19 @@ class PPDETRTransformer(nn.Layer):
         # get encoder inputs
         feat_flatten = []
         spatial_shapes = []
+        level_start_index = [0, ]
         for i, feat in enumerate(proj_feats):
-            _, _, h, w = paddle.shape(feat)
-            spatial_shapes.append(paddle.concat([h, w]))
-            # [b,c,h,w] -> [b,h*w,c]
+            _, _, h, w = feat.shape
+            # [b, c, h, w] -> [b, h*w, c]
             feat_flatten.append(feat.flatten(2).transpose([0, 2, 1]))
+            # [num_levels, 2]
+            spatial_shapes.append([h, w])
+            # [l], start index of each level
+            level_start_index.append(h * w)
 
         # [b, l, c]
         feat_flatten = paddle.concat(feat_flatten, 1)
-        # [num_levels, 2]
-        spatial_shapes = paddle.to_tensor(
-            paddle.stack(spatial_shapes).astype('int64'))
-        # [l], 每一个level的起始index
-        level_start_index = paddle.concat([
-            paddle.zeros(
-                [1], dtype='int64'), spatial_shapes.prod(1).cumsum(0)[:-1]
-        ])
+        level_start_index.pop()
         return (feat_flatten, spatial_shapes, level_start_index)
 
     def forward(self, feats, pad_mask=None, gt_meta=None):
@@ -408,8 +476,7 @@ class PPDETRTransformer(nn.Layer):
                           dtype="float32"):
         if spatial_shapes is None:
             spatial_shapes = [
-                paddle.to_tensor(
-                    [int(self.eval_size[0] / s), int(self.eval_size[1] / s)])
+                [int(self.eval_size[0] / s), int(self.eval_size[1] / s)]
                 for s in self.feat_strides
             ]
         anchors = []
@@ -421,7 +488,7 @@ class PPDETRTransformer(nn.Layer):
                     end=w, dtype=dtype))
             grid_xy = paddle.stack([grid_x, grid_y], -1)
 
-            valid_WH = paddle.concat([h, w]).astype(dtype)
+            valid_WH = paddle.to_tensor([h, w]).astype(dtype)
             grid_xy = (grid_xy.unsqueeze(0) + 0.5) / valid_WH
             wh = paddle.ones_like(grid_xy) * grid_size * (2.0**lvl)
             anchors.append(
@@ -465,15 +532,18 @@ class PPDETRTransformer(nn.Layer):
         if denoising_bbox_unact is not None:
             reference_points_unact = paddle.concat(
                 [denoising_bbox_unact, reference_points_unact], 1)
+        if self.training:
+            reference_points_unact = reference_points_unact.detach()
         enc_topk_logits = paddle.gather_nd(enc_outputs_class, topk_ind)
 
         # extract region features
         if self.learnt_init_query:
             target = self.tgt_embed.weight.unsqueeze(0).tile([bs, 1, 1])
         else:
-            target = paddle.gather_nd(output_memory, topk_ind).detach()
+            target = paddle.gather_nd(output_memory, topk_ind)
+            if self.training:
+                target = target.detach()
         if denoising_class is not None:
             target = paddle.concat([denoising_class, target], 1)
 
-        return target, reference_points_unact.detach(
-        ), enc_topk_bboxes, enc_topk_logits
+        return target, reference_points_unact, enc_topk_bboxes, enc_topk_logits
