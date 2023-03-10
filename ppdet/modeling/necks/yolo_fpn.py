@@ -22,6 +22,8 @@ from ..backbones.darknet import ConvBNLayer
 from ..shape_spec import ShapeSpec
 from ..backbones.csp_darknet import BaseConv, DWConv, CSPLayer
 from ..necks.custom_pan import TransformerEncoderLayer, TransformerEncoder
+from paddle import ParamAttr
+from paddle.regularizer import L2Decay
 
 __all__ = ['YOLOv3FPN', 'PPYOLOFPN', 'PPYOLOTinyFPN', 'PPYOLOPAN', 'YOLOCSPPAN']
 
@@ -1030,7 +1032,13 @@ class YOLOCSPPAN(nn.Layer):
             for idx in range(len(in_channels)):
                 if proj_use_conv:
                     self.neck_input_proj.append(
-                        nn.Conv2D(int(in_channels[idx]), proj_dim[idx], 1, 1))
+                        nn.Sequential(
+                            nn.Conv2D(
+                                int(in_channels[idx]), proj_dim[idx], 1, 1),
+                            nn.BatchNorm2D(
+                                proj_dim[idx],
+                                weight_attr=ParamAttr(regularizer=L2Decay(0.0)),
+                                bias_attr=ParamAttr(regularizer=L2Decay(0.0)))))
                 else:
                     self.neck_input_proj.append(
                         BaseConv(

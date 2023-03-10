@@ -3884,6 +3884,211 @@ class Mosaic(BaseOperator):
 
 
 @register_op
+class TRMosaic(BaseOperator):
+    """ Mosaic operator for image and gt_bboxes
+    The code is based on https://github.com/Megvii-BaseDetection/YOLOX/blob/main/yolox/data/datasets/mosaicdetection.py
+    1. get mosaic coords
+    2. clip bbox and get mosaic_labels
+    3. random_affine augment
+    4. Mixup augment as copypaste (optinal), not used in tiny/nano
+    Args:
+        prob (float): probability of using Mosaic, 1.0 as default
+        input_dim (list[int]): input shape
+        degrees (list[2]): the rotate range to apply, transform range is [min, max]
+        translate (list[2]): the translate range to apply, transform range is [min, max]
+        scale (list[2]): the scale range to apply, transform range is [min, max]
+        shear (list[2]): the shear range to apply, transform range is [min, max]
+        enable_mixup (bool): whether to enable Mixup or not
+        mixup_prob (float): probability of using Mixup, 1.0 as default
+        mixup_scale (list[int]): scale range of Mixup
+        remove_outside_box (bool): whether remove outside boxes, False as
+            default in COCO dataset, True in MOT dataset
+    """
+
+    def __init__(self,
+                 prob=1.0,
+                 target_size=640,
+                 translate=[-0.1, 0.1],
+                 scale=[0.1, 2.0],
+                 degree=[-10, 10],
+                 shear=[-2, 2],
+                 fill_value=(0, 0, 0)):
+        super(TRMosaic, self).__init__()
+        self.prob = prob
+        if isinstance(target_size, Integral):
+            target_size = [target_size, target_size]
+        self.target_size = tuple(target_size)
+        self.translate = translate
+        self.scale = scale
+        self.degree = degree
+        self.shear = shear
+        self.fill_value = fill_value
+
+        self.resize_op = Resize(target_size, keep_ratio=True)
+
+    def get_mosaic_coords(self, mosaic_idx, xc, yc, w, h, input_h, input_w):
+        # (x1, y1, x2, y2) means coords in large image,
+        # small_coords means coords in small image in mosaic aug.
+        if mosaic_idx == 0:
+            # top left
+            x1, y1, x2, y2 = max(xc - w, 0), max(yc - h, 0), xc, yc
+            small_coords = (w - (x2 - x1), h - (y2 - y1), w, h)
+        elif mosaic_idx == 1:
+            # top right
+            x1, y1, x2, y2 = xc, max(yc - h, 0), min(xc + w, input_w * 2), yc
+            small_coords = (0, h - (y2 - y1), min(w, x2 - x1), h)
+        elif mosaic_idx == 2:
+            # bottom left
+            x1, y1, x2, y2 = max(xc - w, 0), yc, xc, min(input_h * 2, yc + h)
+            small_coords = (w - (x2 - x1), 0, w, min(y2 - y1, h))
+        elif mosaic_idx == 3:
+            # bottom right
+            x1, y1, x2, y2 = xc, yc, min(xc + w, input_w * 2), min(input_h * 2,
+                                                                   yc + h)
+            small_coords = (0, 0, min(w, x2 - x1), min(y2 - y1, h))
+
+        return (x1, y1, x2, y2), small_coords
+
+    def random_affine_augment(self, img, gt_bbox):
+        # random rotation and scale
+        degree = random.uniform(self.degree[0], self.degree[1])
+        scale = random.uniform(self.scale[0], self.scale[1])
+        assert scale > 0, "Argument scale should be positive."
+        R = cv2.getRotationMatrix2D(angle=degree, center=(0, 0), scale=scale)
+        M = np.ones([2, 3])
+
+        # random shear
+        shear = random.uniform(self.shear[0], self.shear[1])
+        shear_x = math.tan(shear * math.pi / 180)
+        shear_y = math.tan(shear * math.pi / 180)
+        M[0] = R[0] + shear_y * R[1]
+        M[1] = R[1] + shear_x * R[0]
+
+        # random translation
+        translate = random.uniform(self.translate[0], self.translate[1])
+        translation_x = translate * self.target_size[1]
+        translation_y = translate * self.target_size[0]
+        M[0, 2] = translation_x
+        M[1, 2] = translation_y
+
+        # warpAffine
+        img = cv2.warpAffine(
+            img,
+            M,
+            dsize=(self.target_size[1], self.target_size[0]),
+            flags=cv2.INTER_LINEAR,
+            borderValue=self.fill_value)
+
+        num_gts = len(gt_bbox)
+        if num_gts > 0:
+            # warp corner points
+            corner_points = np.ones((4 * num_gts, 3))
+            corner_points[:, :2] = gt_bbox[:, [0, 1, 2, 3, 0, 3, 2, 1]].reshape(
+                4 * num_gts, 2)  # x1y1, x2y2, x1y2, x2y1
+            # apply affine transform
+            corner_points = corner_points @M.T
+            corner_points = corner_points.reshape(num_gts, 8)
+
+            # create new boxes
+            corner_xs = corner_points[:, 0::2]
+            corner_ys = corner_points[:, 1::2]
+            gt_bbox = np.stack(
+                [
+                    corner_xs.min(1), corner_ys.min(1), corner_xs.max(1),
+                    corner_ys.max(1)
+                ],
+                axis=-1)
+
+            # clip boxes
+            gt_bbox[:, 0::2] = np.clip(gt_bbox[:, 0::2], 0, self.target_size[1])
+            gt_bbox[:, 1::2] = np.clip(gt_bbox[:, 1::2], 0, self.target_size[0])
+
+        return img, gt_bbox
+
+    def __call__(self, sample, context=None):
+        if not isinstance(sample, Sequence):
+            return sample
+
+        assert len(sample) >= 4
+        if np.random.uniform(0., 1.) > self.prob:
+            return self.resize_op(sample[0])
+
+        out_h, out_w = self.target_size
+        mosaic_gt_bbox, mosaic_gt_class = [], []
+        mosaic_is_crowd, mosaic_difficult = [], []
+        mosaic_img = np.ones([out_h * 2, out_w * 2, 3], dtype=np.float32)
+        for i, v in enumerate(self.fill_value):
+            mosaic_img[..., i] *= v
+
+        # 1. get mosaic coords
+        for mosaic_idx, sp in enumerate(sample[:4]):
+            sp = self.resize_op(sp)
+            img = sp['image']
+            gt_bbox = sp['gt_bbox']
+            h, w = img.shape[:2]
+
+            # suffix l means large image, while s means small image in mosaic aug.
+            (l_x1, l_y1, l_x2, l_y2), (
+                s_x1, s_y1, s_x2, s_y2) = self.get_mosaic_coords(
+                    mosaic_idx, out_w, out_h, w, h, out_h, out_w)
+
+            mosaic_img[l_y1:l_y2, l_x1:l_x2] = img[s_y1:s_y2, s_x1:s_x2]
+            padw, padh = l_x1 - s_x1, l_y1 - s_y1
+
+            if len(gt_bbox) > 0:
+                gt_bbox[:, 0] = gt_bbox[:, 0] + padw
+                gt_bbox[:, 1] = gt_bbox[:, 1] + padh
+                gt_bbox[:, 2] = gt_bbox[:, 2] + padw
+                gt_bbox[:, 3] = gt_bbox[:, 3] + padh
+
+            mosaic_gt_bbox.append(gt_bbox)
+            mosaic_gt_class.append(sp['gt_class'])
+            if 'is_crowd' in sp:
+                mosaic_is_crowd.append(sp['is_crowd'])
+            if 'difficult' in sp:
+                mosaic_difficult.append(sp['difficult'])
+
+        # 2. clip bbox and get mosaic_labels([gt_bbox, gt_class, is_crowd])
+        if len(mosaic_gt_bbox) > 0:
+            mosaic_gt_bbox = np.concatenate(mosaic_gt_bbox, 0)
+            mosaic_gt_class = np.concatenate(mosaic_gt_class, 0)
+            if mosaic_is_crowd:
+                mosaic_is_crowd = np.concatenate(mosaic_is_crowd, 0)
+            if mosaic_difficult:
+                mosaic_difficult = np.concatenate(mosaic_difficult, 0)
+            mosaic_gt_bbox[:, 0::2] = np.clip(mosaic_gt_bbox[:, 0::2], 0,
+                                              2 * self.target_size[1])
+            mosaic_gt_bbox[:, 1::2] = np.clip(mosaic_gt_bbox[:, 1::2], 0,
+                                              2 * self.target_size[0])
+        else:
+            mosaic_gt_bbox = np.zeros([0, 4], dtype=np.float32)
+            mosaic_gt_class = np.zeros([0, 1], dtype=np.int32)
+            mosaic_is_crowd = np.zeros([0, 1], dtype=np.int32)
+            mosaic_difficult = np.zeros([0, 1], dtype=np.int32)
+
+        # 3. random_affine augment
+        mosaic_img, mosaic_gt_bbox = self.random_affine_augment(mosaic_img,
+                                                                mosaic_gt_bbox)
+        # filter bboxes
+        mask = np.minimum(mosaic_gt_bbox[:, 2] - mosaic_gt_bbox[:, 0],
+                          mosaic_gt_bbox[:, 3] - mosaic_gt_bbox[:, 1]) > 1
+
+        sample0 = sample[0]
+        sample0['image'] = mosaic_img.astype(np.float32)
+        sample0['h'] = float(mosaic_img.shape[0])
+        sample0['w'] = float(mosaic_img.shape[1])
+        sample0['im_shape'][0] = sample0['h']
+        sample0['im_shape'][1] = sample0['w']
+        sample0['gt_bbox'] = mosaic_gt_bbox[mask].astype(np.float32)
+        sample0['gt_class'] = mosaic_gt_class[mask].astype(np.int32)
+        if 'is_crowd' in sample[0]:
+            sample0['is_crowd'] = mosaic_is_crowd[mask]
+        if 'difficult' in sample[0]:
+            sample0['difficult'] = mosaic_difficult[mask]
+        return sample0
+
+
+@register_op
 class PadResize(BaseOperator):
     """ PadResize for image and gt_bbbox
 

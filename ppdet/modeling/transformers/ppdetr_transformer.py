@@ -224,32 +224,30 @@ class TransformerDecoder(nn.Layer):
         ref_points_detach = F.sigmoid(ref_points_unact)
         for i, layer in enumerate(self.layers):
             ref_points_input = ref_points_detach.unsqueeze(2)
-            query_pos_embed = get_sine_pos_embed(ref_points_input[..., 0, :],
-                                                 self.hidden_dim // 2)
-            query_pos_embed = query_pos_head(query_pos_embed)
+            query_pos_embed = query_pos_head(ref_points_detach)
 
             output = layer(output, ref_points_input, memory,
                            memory_spatial_shapes, memory_level_start_index,
                            attn_mask, memory_mask, query_pos_embed)
 
-            ref_points_detach = F.sigmoid(bbox_head[i](output) +
-                                          inverse_sigmoid(ref_points_detach))
+            inter_ref_bbox = F.sigmoid(bbox_head[i](output) + inverse_sigmoid(
+                ref_points_detach))
 
             if self.training:
                 dec_out_logits.append(score_head[i](output))
                 if i == 0:
-                    dec_out_bboxes.append(ref_points_detach)
+                    dec_out_bboxes.append(inter_ref_bbox)
                 else:
                     dec_out_bboxes.append(
                         F.sigmoid(bbox_head[i](output) + inverse_sigmoid(
                             ref_points)))
             elif i == len(self.layers) - 1:
                 dec_out_logits.append(score_head[i](output))
-                dec_out_bboxes.append(ref_points_detach)
+                dec_out_bboxes.append(inter_ref_bbox)
 
-            ref_points = ref_points_detach
-            if self.training:
-                ref_points_detach = ref_points_detach.detach()
+            ref_points = inter_ref_bbox
+            ref_points_detach = inter_ref_bbox.detach(
+            ) if self.training else inter_ref_bbox
 
         return paddle.stack(dec_out_bboxes), paddle.stack(dec_out_logits)
 
@@ -319,10 +317,7 @@ class PPDETRTransformer(nn.Layer):
         self.learnt_init_query = learnt_init_query
         if learnt_init_query:
             self.tgt_embed = nn.Embedding(num_queries, hidden_dim)
-        self.query_pos_head = MLP(2 * hidden_dim,
-                                  hidden_dim,
-                                  hidden_dim,
-                                  num_layers=2)
+        self.query_pos_head = MLP(4, 2 * hidden_dim, hidden_dim, num_layers=2)
 
         # encoder head
         self.enc_output = nn.Sequential(
@@ -427,7 +422,7 @@ class PPDETRTransformer(nn.Layer):
             # [num_levels, 2]
             spatial_shapes.append([h, w])
             # [l], start index of each level
-            level_start_index.append(h * w)
+            level_start_index.append(h * w + level_start_index[-1])
 
         # [b, l, c]
         feat_flatten = paddle.concat(feat_flatten, 1)
