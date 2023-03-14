@@ -447,7 +447,8 @@ class PPDETRTransformer(nn.Layer):
         else:
             denoising_class, denoising_bbox_unact, attn_mask, dn_meta = None, None, None, None
 
-        target, init_ref_points_unact, enc_topk_bboxes, enc_topk_logits = \
+        target, init_ref_points_unact, enc_topk_bboxes,\
+        enc_topk_logits, anchors, enc_out_bboxes, enc_out_logits = \
             self._get_decoder_input(
             memory, spatial_shapes, denoising_class, denoising_bbox_unact)
 
@@ -462,8 +463,10 @@ class PPDETRTransformer(nn.Layer):
             self.dec_score_head,
             self.query_pos_head,
             attn_mask=attn_mask)
+        num_anchors_list = [h * w for h, w in spatial_shapes]
         return (out_bboxes, out_logits, enc_topk_bboxes, enc_topk_logits,
-                dn_meta)
+                dn_meta, anchors, num_anchors_list, enc_out_bboxes,
+                enc_out_logits)
 
     def _generate_anchors(self,
                           spatial_shapes=None,
@@ -477,25 +480,16 @@ class PPDETRTransformer(nn.Layer):
         anchors = []
         for lvl, (h, w) in enumerate(spatial_shapes):
             grid_y, grid_x = paddle.meshgrid(
-                paddle.arange(
-                    end=h, dtype=dtype),
-                paddle.arange(
-                    end=w, dtype=dtype))
-            grid_xy = paddle.stack([grid_x, grid_y], -1)
+                paddle.arange(end=h), paddle.arange(end=w))
+            grid_xy = paddle.stack([grid_x, grid_y], -1).astype(dtype)
 
             valid_WH = paddle.to_tensor([h, w]).astype(dtype)
-            grid_xy = (grid_xy.unsqueeze(0) + 0.5) / valid_WH
+            grid_xy = (grid_xy + 0.5) / valid_WH
             wh = paddle.ones_like(grid_xy) * grid_size * (2.0**lvl)
-            anchors.append(
-                paddle.concat([grid_xy, wh], -1).reshape([-1, h * w, 4]))
+            anchors.append(paddle.concat([grid_xy, wh], -1).reshape([h * w, 4]))
 
-        anchors = paddle.concat(anchors, 1)
-        valid_mask = ((anchors > self.eps) *
-                      (anchors < 1 - self.eps)).all(-1, keepdim=True)
-        anchors = paddle.log(anchors / (1 - anchors))
-        anchors = paddle.where(valid_mask, anchors,
-                               paddle.to_tensor(float("inf")))
-        return anchors, valid_mask
+        anchors = paddle.concat(anchors)
+        return anchors, paddle.log(anchors / (1 - anchors))
 
     def _get_decoder_input(self,
                            memory,
@@ -505,14 +499,14 @@ class PPDETRTransformer(nn.Layer):
         bs, _, _ = memory.shape
         # prepare input for decoder
         if self.training or self.eval_size is None:
-            anchors, valid_mask = self._generate_anchors(spatial_shapes)
+            anchors, anchors_unact = self._generate_anchors(spatial_shapes)
         else:
-            anchors, valid_mask = self.anchors, self.valid_mask
-        memory = paddle.where(valid_mask, memory, paddle.to_tensor(0.))
+            anchors, anchors_unact = self.anchors, self.valid_mask
         output_memory = self.enc_output(memory)
 
         enc_outputs_class = self.enc_score_head(output_memory)
-        enc_outputs_coord_unact = self.enc_bbox_head(output_memory) + anchors
+        enc_outputs_coord_unact = self.enc_bbox_head(
+            output_memory) + anchors_unact
 
         _, topk_ind = paddle.topk(
             enc_outputs_class.max(-1), self.num_queries, axis=1)
@@ -541,4 +535,6 @@ class PPDETRTransformer(nn.Layer):
         if denoising_class is not None:
             target = paddle.concat([denoising_class, target], 1)
 
-        return target, reference_points_unact, enc_topk_bboxes, enc_topk_logits
+        return target, reference_points_unact,\
+               enc_topk_bboxes, enc_topk_logits, anchors,\
+               F.sigmoid(enc_outputs_coord_unact), enc_outputs_class
