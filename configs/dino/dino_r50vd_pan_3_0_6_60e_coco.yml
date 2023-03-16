@@ -9,4 +9,4 @@ _BASE_: [
 weights: output/dino_r50vd_pan_3_0_6_60e_coco/model_final
 find_unused_parameters: True
 log_iter: 200
-snapshot_epoch: 5
+snapshot_epoch: 2
