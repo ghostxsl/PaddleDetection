@@ -384,8 +384,22 @@ class DINOLoss(DETRLoss):
                 dn_meta=None,
                 **kwargs):
         num_gts = self._get_num_gts(gt_class)
-        total_loss = super(DINOLoss, self).forward(
-            boxes, logits, gt_bbox, gt_class, num_gts=num_gts)
+        enc_match_indices = kwargs.get('enc_match_indices', None)
+        if enc_match_indices is None:
+            total_loss = super(DINOLoss, self).forward(
+                boxes, logits, gt_bbox, gt_class, num_gts=num_gts)
+        else:
+            total_loss = super(DINOLoss, self).forward(
+                boxes[1:], logits[1:], gt_bbox, gt_class, num_gts=num_gts)
+            total_loss.update(
+                self._get_prediction_loss(
+                    boxes[0],
+                    logits[0],
+                    gt_bbox,
+                    gt_class,
+                    postfix="_enc",
+                    dn_match_indices=enc_match_indices,
+                    num_gts=num_gts))
 
         if dn_meta is not None:
             dn_positive_idx, dn_num_group = \

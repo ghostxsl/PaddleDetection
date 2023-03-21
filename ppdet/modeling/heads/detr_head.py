@@ -375,7 +375,7 @@ class DINOHead(nn.Layer):
 
     def forward(self, out_transformer, body_feats, inputs=None):
         (dec_out_bboxes, dec_out_logits, enc_topk_bboxes, enc_topk_logits,
-         dn_meta) = out_transformer
+         dn_meta, enc_match_indices) = out_transformer
         if self.training:
             assert inputs is not None
             assert 'gt_bbox' in inputs and 'gt_class' in inputs
@@ -457,7 +457,8 @@ class DINOHead(nn.Layer):
                 inputs['gt_class'],
                 dn_out_bboxes=dn_out_bboxes,
                 dn_out_logits=dn_out_logits,
-                dn_meta=dn_meta)
+                dn_meta=dn_meta,
+                enc_match_indices=enc_match_indices)
         else:
             return (dec_out_bboxes[self.eval_idx],
                     dec_out_logits[self.eval_idx], None)

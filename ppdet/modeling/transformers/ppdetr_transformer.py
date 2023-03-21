@@ -33,8 +33,10 @@ from ..heads.detr_head import MLP
 from .deformable_transformer import MSDeformableAttention
 from ..initializer import (linear_init_, constant_, xavier_uniform_, normal_,
                            bias_init_with_prob)
-from .utils import (_get_clones, get_sine_pos_embed,
+from .utils import (_get_clones, get_sine_pos_embed, pad_gt,
+                    bbox_cxcywh_to_xyxy,
                     get_contrastive_denoising_training_group, inverse_sigmoid)
+from ..bbox_utils import batch_iou_similarity
 
 __all__ = ['PPDETRTransformer']
 
@@ -177,10 +179,7 @@ class TransformerDecoderLayer(nn.Layer):
         # self attention
         q = k = self.with_pos_embed(tgt, query_pos_embed)
         if attn_mask is not None:
-            attn_mask = paddle.where(
-                attn_mask.astype('bool'),
-                paddle.zeros(attn_mask.shape, tgt.dtype),
-                paddle.full(attn_mask.shape, float("-inf"), tgt.dtype))
+            attn_mask = attn_mask.astype('bool')
         tgt2 = self.self_attn(q, k, value=tgt, attn_mask=attn_mask)
         tgt = tgt + self.dropout1(tgt2)
         tgt = self.norm1(tgt)
@@ -255,11 +254,13 @@ class TransformerDecoder(nn.Layer):
 @register
 class PPDETRTransformer(nn.Layer):
     __shared__ = ['num_classes', 'hidden_dim', 'eval_size']
+    __inject__ = ['matcher']
 
     def __init__(self,
                  num_classes=80,
                  hidden_dim=256,
-                 num_queries=300,
+                 num_queries_train=900,
+                 num_queries_eval=300,
                  position_embed_type='sine',
                  backbone_feat_channels=[512, 1024, 2048],
                  feat_strides=[8, 16, 32],
@@ -275,6 +276,7 @@ class PPDETRTransformer(nn.Layer):
                  box_noise_scale=1.0,
                  learnt_init_query=True,
                  eval_size=None,
+                 matcher='HungarianMatcher',
                  eps=1e-2):
         super(PPDETRTransformer, self).__init__()
         assert position_embed_type in ['sine', 'learned'], \
@@ -289,10 +291,12 @@ class PPDETRTransformer(nn.Layer):
         self.feat_strides = feat_strides
         self.num_levels = num_levels
         self.num_classes = num_classes
-        self.num_queries = num_queries
+        self.num_queries_train = num_queries_train
+        self.num_queries_eval = num_queries_eval
         self.eps = eps
         self.num_decoder_layers = num_decoder_layers
         self.eval_size = eval_size
+        self.matcher = matcher
 
         # backbone feature projection
         self._build_input_proj_layer(backbone_feat_channels)
@@ -316,7 +320,8 @@ class PPDETRTransformer(nn.Layer):
         # decoder embedding
         self.learnt_init_query = learnt_init_query
         if learnt_init_query:
-            self.tgt_embed = nn.Embedding(num_queries, hidden_dim)
+            assert num_queries_train == num_queries_eval
+            self.tgt_embed = nn.Embedding(num_queries_train, hidden_dim)
         self.query_pos_head = MLP(4, 2 * hidden_dim, hidden_dim, num_layers=2)
 
         # encoder head
@@ -439,7 +444,7 @@ class PPDETRTransformer(nn.Layer):
             denoising_class, denoising_bbox_unact, attn_mask, dn_meta = \
                 get_contrastive_denoising_training_group(gt_meta,
                                             self.num_classes,
-                                            self.num_queries,
+                                            self.num_queries_train,
                                             self.denoising_class_embed.weight,
                                             self.num_denoising,
                                             self.label_noise_ratio,
@@ -447,9 +452,10 @@ class PPDETRTransformer(nn.Layer):
         else:
             denoising_class, denoising_bbox_unact, attn_mask, dn_meta = None, None, None, None
 
-        target, init_ref_points_unact, enc_topk_bboxes, enc_topk_logits = \
+        target, init_ref_points_unact, \
+        enc_topk_bboxes, enc_topk_logits, match_indices = \
             self._get_decoder_input(
-            memory, spatial_shapes, denoising_class, denoising_bbox_unact)
+            memory, spatial_shapes, denoising_class, denoising_bbox_unact, gt_meta)
 
         # decoder
         out_bboxes, out_logits = self.decoder(
@@ -463,7 +469,7 @@ class PPDETRTransformer(nn.Layer):
             self.query_pos_head,
             attn_mask=attn_mask)
         return (out_bboxes, out_logits, enc_topk_bboxes, enc_topk_logits,
-                dn_meta)
+                dn_meta, match_indices)
 
     def _generate_anchors(self,
                           spatial_shapes=None,
@@ -494,14 +500,15 @@ class PPDETRTransformer(nn.Layer):
                       (anchors < 1 - self.eps)).all(-1, keepdim=True)
         anchors = paddle.log(anchors / (1 - anchors))
         anchors = paddle.where(valid_mask, anchors,
-                               paddle.to_tensor(float("inf")))
+                               paddle.to_tensor(float("-inf")))
         return anchors, valid_mask
 
     def _get_decoder_input(self,
                            memory,
                            spatial_shapes,
                            denoising_class=None,
-                           denoising_bbox_unact=None):
+                           denoising_bbox_unact=None,
+                           gt_meta=None):
         bs, _, _ = memory.shape
         # prepare input for decoder
         if self.training or self.eval_size is None:
@@ -514,11 +521,19 @@ class PPDETRTransformer(nn.Layer):
         enc_outputs_class = self.enc_score_head(output_memory)
         enc_outputs_coord_unact = self.enc_bbox_head(output_memory) + anchors
 
-        _, topk_ind = paddle.topk(
-            enc_outputs_class.max(-1), self.num_queries, axis=1)
+        if self.training:
+            num_queries = self.num_queries_train
+            topk_ind, match_indices = self._ohem_query_selection(
+                F.sigmoid(enc_outputs_coord_unact).detach(),
+                enc_outputs_class.detach(), gt_meta, num_queries)
+        else:
+            num_queries = self.num_queries_eval
+            _, topk_ind = paddle.topk(
+                enc_outputs_class.max(-1), num_queries, axis=1)
+            match_indices = None
         # extract region proposal boxes
         batch_ind = paddle.arange(end=bs, dtype=topk_ind.dtype)
-        batch_ind = batch_ind.unsqueeze(-1).tile([1, self.num_queries])
+        batch_ind = batch_ind.unsqueeze(-1).tile([1, num_queries])
         topk_ind = paddle.stack([batch_ind, topk_ind], axis=-1)
 
         reference_points_unact = paddle.gather_nd(enc_outputs_coord_unact,
@@ -541,4 +556,43 @@ class PPDETRTransformer(nn.Layer):
         if denoising_class is not None:
             target = paddle.concat([denoising_class, target], 1)
 
-        return target, reference_points_unact, enc_topk_bboxes, enc_topk_logits
+        return target, reference_points_unact, enc_topk_bboxes,\
+               enc_topk_logits, match_indices
+
+    def _ohem_query_selection(self, pred_bboxes, pred_logits, gt_meta,
+                              num_queries):
+        bs = pred_bboxes.shape[0]
+        _, gt_bboxes, _ = pad_gt(gt_meta['gt_class'], gt_meta['gt_bbox'])
+        if gt_bboxes.shape[1] > 0:
+            iou_score = batch_iou_similarity(
+                bbox_cxcywh_to_xyxy(pred_bboxes),
+                bbox_cxcywh_to_xyxy(gt_bboxes)).max(-1)
+            _, candi_ind = paddle.topk(iou_score, num_queries, axis=1)
+            topk_bboxes = paddle.stack([
+                paddle.gather(x, ind) for x, ind in zip(pred_bboxes, candi_ind)
+            ])
+            topk_logits = paddle.stack([
+                paddle.gather(x, ind) for x, ind in zip(pred_logits, candi_ind)
+            ])
+            match_indices = self.matcher(topk_bboxes, topk_logits,
+                                         gt_meta['gt_bbox'],
+                                         gt_meta['gt_class'])
+            topk_ind = []
+            for i, (logit, match, ind
+                    ) in enumerate(zip(pred_logits, match_indices, candi_ind)):
+                p, t = match
+                p = paddle.gather(ind, p)
+                num_gt = len(t)
+                neg_logit = paddle.scatter(
+                    logit.max(-1), p, paddle.full([num_gt], float('-inf')))
+                _, neg_ind = paddle.topk(neg_logit, num_queries)
+                match_indices[i] = (paddle.arange(num_gt), t)
+                topk_ind.append(
+                    paddle.concat([p, neg_ind[:num_queries - num_gt]]))
+            topk_ind = paddle.stack(topk_ind)
+        else:
+            _, topk_ind = paddle.topk(pred_logits.max(-1), num_queries, axis=1)
+            match_indices = [(paddle.to_tensor(
+                [], dtype=paddle.int64), paddle.to_tensor(
+                    [], dtype=paddle.int64)) for _ in range(bs)]
+        return topk_ind, match_indices

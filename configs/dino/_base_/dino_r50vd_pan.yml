@@ -43,7 +43,8 @@ HybridEncoder:
 
 
 PPDETRTransformer:
-  num_queries: 300
+  num_queries_train: 300
+  num_queries_eval: 300
   position_embed_type: sine
   feat_strides: [8, 16, 32]
   num_levels: 3
@@ -52,10 +53,13 @@ PPDETRTransformer:
   dim_feedforward: 1024
   dropout: 0.0
   activation: relu
-  num_denoising: 100
+  num_denoising: 200
   label_noise_ratio: 0.5
   box_noise_scale: 1.0
   learnt_init_query: False
+  matcher:
+    name: HungarianMatcher
+    matcher_coeff: {class: 1, bbox: 5, giou: 2}
 
 DINOHead:
   loss:
@@ -63,12 +67,9 @@ DINOHead:
     loss_coeff: {class: 1, bbox: 5, giou: 2}
     aux_loss: True
     use_vfl: True
-    use_same_match: True
-    same_match_ind: 0
     matcher:
       name: HungarianMatcher
       matcher_coeff: {class: 2, bbox: 5, giou: 2}
-      use_pos_only: True
 
 DETRPostProcess:
   num_top_queries: 300
