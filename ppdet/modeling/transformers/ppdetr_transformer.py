@@ -33,8 +33,9 @@ from ..heads.detr_head import MLP
 from .deformable_transformer import MSDeformableAttention
 from ..initializer import (linear_init_, constant_, xavier_uniform_, normal_,
                            bias_init_with_prob)
-from .utils import (_get_clones, get_sine_pos_embed,
+from .utils import (_get_clones, get_sine_pos_embed, bbox_cxcywh_to_xyxy,
                     get_contrastive_denoising_training_group, inverse_sigmoid)
+from ..bbox_utils import batch_iou_similarity
 
 __all__ = ['PPDETRTransformer']
 
@@ -449,7 +450,7 @@ class PPDETRTransformer(nn.Layer):
 
         target, init_ref_points_unact, enc_topk_bboxes, enc_topk_logits = \
             self._get_decoder_input(
-            memory, spatial_shapes, denoising_class, denoising_bbox_unact)
+            memory, spatial_shapes, denoising_class, denoising_bbox_unact, gt_meta)
 
         # decoder
         out_bboxes, out_logits = self.decoder(
@@ -494,14 +495,15 @@ class PPDETRTransformer(nn.Layer):
                       (anchors < 1 - self.eps)).all(-1, keepdim=True)
         anchors = paddle.log(anchors / (1 - anchors))
         anchors = paddle.where(valid_mask, anchors,
-                               paddle.to_tensor(float("inf")))
+                               paddle.to_tensor(float("-inf")))
         return anchors, valid_mask
 
     def _get_decoder_input(self,
                            memory,
                            spatial_shapes,
                            denoising_class=None,
-                           denoising_bbox_unact=None):
+                           denoising_bbox_unact=None,
+                           gt_meta=None):
         bs, _, _ = memory.shape
         # prepare input for decoder
         if self.training or self.eval_size is None:
@@ -514,8 +516,15 @@ class PPDETRTransformer(nn.Layer):
         enc_outputs_class = self.enc_score_head(output_memory)
         enc_outputs_coord_unact = self.enc_bbox_head(output_memory) + anchors
 
-        _, topk_ind = paddle.topk(
-            enc_outputs_class.max(-1), self.num_queries, axis=1)
+        _, gt_bboxes, _ = pad_gt(gt_meta['gt_class'], gt_meta['gt_bbox'])
+        if gt_bboxes.shape[1] > 0:
+            iou_score = batch_iou_similarity(
+                bbox_cxcywh_to_xyxy(F.sigmoid(enc_outputs_coord_unact)),
+                bbox_cxcywh_to_xyxy(gt_bboxes)).max(-1)
+            _, topk_ind = paddle.topk(iou_score, self.num_queries, axis=1)
+        else:
+            _, topk_ind = paddle.topk(
+                enc_outputs_class.max(-1), self.num_queries, axis=1)
         # extract region proposal boxes
         batch_ind = paddle.arange(end=bs, dtype=topk_ind.dtype)
         batch_ind = batch_ind.unsqueeze(-1).tile([1, self.num_queries])
@@ -542,3 +551,21 @@ class PPDETRTransformer(nn.Layer):
             target = paddle.concat([denoising_class, target], 1)
 
         return target, reference_points_unact, enc_topk_bboxes, enc_topk_logits
+
+
+def pad_gt(gt_labels, gt_bboxes):
+    bs = len(gt_bboxes)
+    num_max_boxes = max([len(s) for s in gt_bboxes])
+    pad_gt_labels = paddle.zeros([bs, num_max_boxes, 1], dtype='int32')
+    pad_gt_bboxes = paddle.zeros([bs, num_max_boxes, 4])
+    pad_gt_mask = paddle.zeros([bs, num_max_boxes, 1])
+    if num_max_boxes == 0:
+        return pad_gt_labels, pad_gt_bboxes, pad_gt_mask
+
+    for i, (label, bbox) in enumerate(zip(gt_labels, gt_bboxes)):
+        num_gt = len(label)
+        if num_gt > 0:
+            pad_gt_labels[i, :num_gt] = label
+            pad_gt_bboxes[i, :num_gt] = bbox
+            pad_gt_mask[i, :num_gt] = 1
+    return pad_gt_labels, pad_gt_bboxes, pad_gt_mask

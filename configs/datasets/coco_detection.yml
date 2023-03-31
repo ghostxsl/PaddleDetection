@@ -14,6 +14,7 @@ EvalDataset:
   anno_path: annotations/instances_val2017.json
   dataset_dir: dataset/coco
   allow_empty: true
+  data_fields: ['image', 'gt_bbox', 'gt_class', 'is_crowd']
 
 TestDataset:
   name: ImageFolder
