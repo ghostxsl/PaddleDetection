@@ -18,7 +18,8 @@ import paddle.nn.functional as F
 from ppdet.core.workspace import register, serializable
 from ppdet.modeling.ops import get_act_fn
 from ..shape_spec import ShapeSpec
-from ..backbones.csp_darknet import BaseConv
+from ..backbones.csp_darknet import BaseConv, CSPLayer
+from ppdet.modeling.layers import ConvNormLayer
 from ..backbones.cspresnet import RepVggBlock
 from ppdet.modeling.transformers.detr_transformer import TransformerEncoder
 from ..initializer import xavier_uniform_, linear_init_
@@ -26,7 +27,7 @@ from ..layers import MultiHeadAttention
 from paddle import ParamAttr
 from paddle.regularizer import L2Decay
 
-__all__ = ['HybridEncoder']
+__all__ = ['HybridEncoder', 'ExpHybridEncoder']
 
 
 class CSPRepLayer(nn.Layer):
@@ -81,6 +82,7 @@ class TransformerLayer(nn.Layer):
         attn_dropout = dropout if attn_dropout is None else attn_dropout
         act_dropout = dropout if act_dropout is None else act_dropout
         self.normalize_before = normalize_before
+        self.hidden_dim = d_model
 
         self.self_attn = MultiHeadAttention(d_model, nhead, attn_dropout)
         # Implementation of Feedforward model
@@ -284,6 +286,317 @@ class HybridEncoder(nn.Layer):
             outs.append(out)
 
         return outs
+
+    @classmethod
+    def from_config(cls, cfg, input_shape):
+        return {
+            'in_channels': [i.channels for i in input_shape],
+            'feat_strides': [i.stride for i in input_shape]
+        }
+
+    @property
+    def out_shape(self):
+        return [
+            ShapeSpec(
+                channels=self.hidden_dim, stride=self.feat_strides[idx])
+            for idx in range(len(self.in_channels))
+        ]
+
+
+@register
+@serializable
+class ExpHybridEncoder(nn.Layer):
+    __shared__ = ['depth_mult', 'act', 'trt', 'eval_size']
+    __inject__ = ['encoder_layer']
+
+    def __init__(self,
+                 in_channels=[512, 1024, 2048],
+                 feat_strides=[8, 16, 32],
+                 hidden_dim=256,
+                 use_encoder_idx=[0, 1, 2],
+                 num_encoder_layers=1,
+                 encoder_layer='TransformerLayer',
+                 pe_temperature=10000,
+                 expansion=1.0,
+                 depth_mult=1.0,
+                 act='silu',
+                 trt=False,
+                 eval_size=None,
+                 with_pan=True,
+                 cross_scale=False,
+                 with_fpn=False,
+                 with_yolocsppan=False):
+        super(ExpHybridEncoder, self).__init__()
+        self.in_channels = in_channels
+        self.feat_strides = feat_strides
+        self.hidden_dim = hidden_dim
+        self.use_encoder_idx = use_encoder_idx
+        self.num_encoder_layers = num_encoder_layers
+        self.pe_temperature = pe_temperature
+        self.eval_size = eval_size
+        self.with_pan = with_pan
+        self.cross_scale = cross_scale
+        self.with_fpn = with_fpn
+        self.with_yolocsppan = with_yolocsppan
+
+        # channel projection
+        self.input_proj = nn.LayerList()
+        for in_channel in in_channels:
+            self.input_proj.append(
+                nn.Sequential(
+                    nn.Conv2D(
+                        in_channel, hidden_dim, kernel_size=1, bias_attr=False),
+                    nn.BatchNorm2D(
+                        hidden_dim,
+                        weight_attr=ParamAttr(regularizer=L2Decay(0.0)),
+                        bias_attr=ParamAttr(regularizer=L2Decay(0.0)))))
+        # encoder transformer
+        self.encoder = TransformerEncoder(encoder_layer, num_encoder_layers)
+        if cross_scale:
+            self.level_embed = nn.Embedding(
+                len(use_encoder_idx),
+                encoder_layer.hidden_dim,
+                weight_attr=ParamAttr(initializer=nn.initializer.Normal()))
+
+        if self.with_pan:
+            act = get_act_fn(
+                act, trt=trt) if act is None or isinstance(act,
+                                                           (str, dict)) else act
+            # top-down fpn
+            self.lateral_convs = nn.LayerList()
+            self.fpn_blocks = nn.LayerList()
+            for idx in range(len(in_channels) - 1, 0, -1):
+                self.lateral_convs.append(
+                    BaseConv(
+                        hidden_dim, hidden_dim, 1, 1, act=act))
+                self.fpn_blocks.append(
+                    CSPRepLayer(
+                        hidden_dim * 2,
+                        hidden_dim,
+                        round(3 * depth_mult),
+                        act=act,
+                        expansion=expansion))
+
+            # bottom-up pan
+            self.downsample_convs = nn.LayerList()
+            self.pan_blocks = nn.LayerList()
+            for idx in range(len(in_channels) - 1):
+                self.downsample_convs.append(
+                    BaseConv(
+                        hidden_dim, hidden_dim, 3, stride=2, act=act))
+                self.pan_blocks.append(
+                    CSPRepLayer(
+                        hidden_dim * 2,
+                        hidden_dim,
+                        round(3 * depth_mult),
+                        act=act,
+                        expansion=expansion))
+
+        if self.with_fpn:
+            self.lateral_convs = nn.LayerList()
+            self.fpn_convs = nn.LayerList()
+            for i in range(len(in_channels)):
+                self.lateral_convs.append(
+                    ConvNormLayer(
+                        ch_in=hidden_dim,
+                        ch_out=hidden_dim,
+                        filter_size=1,
+                        stride=1))
+                self.fpn_convs.append(
+                    ConvNormLayer(
+                        ch_in=hidden_dim,
+                        ch_out=hidden_dim,
+                        filter_size=3,
+                        stride=1))
+
+        if self.with_yolocsppan:
+            act = get_act_fn(
+                act, trt=trt) if act is None or isinstance(act,
+                                                           (str, dict)) else act
+            # top-down fpn
+            self.lateral_convs = nn.LayerList()
+            self.fpn_blocks = nn.LayerList()
+            for idx in range(len(in_channels) - 1, 0, -1):
+                self.lateral_convs.append(
+                    BaseConv(
+                        hidden_dim, hidden_dim, 1, 1, act=act))
+                self.fpn_blocks.append(
+                    CSPLayer(
+                        hidden_dim * 2,
+                        hidden_dim,
+                        round(3 * depth_mult),
+                        shortcut=False,
+                        act=act))
+
+            # bottom-up pan
+            self.downsample_convs = nn.LayerList()
+            self.pan_blocks = nn.LayerList()
+            for idx in range(len(in_channels) - 1):
+                self.downsample_convs.append(
+                    BaseConv(
+                        hidden_dim, hidden_dim, 3, stride=2, act=act))
+                self.pan_blocks.append(
+                    CSPLayer(
+                        hidden_dim * 2,
+                        hidden_dim,
+                        round(3 * depth_mult),
+                        shortcut=False,
+                        act=act))
+
+        self._reset_parameters()
+
+    def _reset_parameters(self):
+        if self.eval_size:
+            for idx in self.use_encoder_idx:
+                stride = self.feat_strides[idx]
+                pos_embed = self.build_2d_sincos_position_embedding(
+                    self.eval_size[1] // stride, self.eval_size[0] // stride,
+                    self.hidden_dim, self.pe_temperature)
+                setattr(self, f'pos_embed{idx}', pos_embed)
+
+    @staticmethod
+    def build_2d_sincos_position_embedding(w,
+                                           h,
+                                           embed_dim=256,
+                                           temperature=10000.):
+        grid_w = paddle.arange(int(w), dtype=paddle.float32)
+        grid_h = paddle.arange(int(h), dtype=paddle.float32)
+        grid_w, grid_h = paddle.meshgrid(grid_w, grid_h)
+        assert embed_dim % 4 == 0, \
+            'Embed dimension must be divisible by 4 for 2D sin-cos position embedding'
+        pos_dim = embed_dim // 4
+        omega = paddle.arange(pos_dim, dtype=paddle.float32) / pos_dim
+        omega = 1. / (temperature**omega)
+
+        out_w = grid_w.flatten()[..., None] @omega[None]
+        out_h = grid_h.flatten()[..., None] @omega[None]
+
+        return paddle.concat(
+            [
+                paddle.sin(out_w), paddle.cos(out_w), paddle.sin(out_h),
+                paddle.cos(out_h)
+            ],
+            axis=1)[None, :, :]
+
+    def forward(self, feats, for_mot=False):
+        assert len(feats) == len(self.in_channels)
+        # get projection features
+        proj_feats = [self.input_proj[i](feat) for i, feat in enumerate(feats)]
+        # encoder
+        if self.num_encoder_layers > 0:
+            if self.cross_scale:
+                feat_flatten = []
+                spatial_shapes = []
+                lvl_pos_embed_flatten = []
+                for i, enc_ind in enumerate(self.use_encoder_idx):
+                    h, w = proj_feats[enc_ind].shape[2:]
+                    spatial_shapes.append([h, w])
+                    # flatten [B, C, H, W] to [B, HxW, C]
+                    src_flatten = proj_feats[enc_ind].flatten(2).transpose(
+                        [0, 2, 1])
+                    feat_flatten.append(src_flatten)
+                    if self.training or self.eval_size is None:
+                        pos_embed = self.build_2d_sincos_position_embedding(
+                            w, h, self.hidden_dim, self.pe_temperature)
+                    else:
+                        pos_embed = getattr(self, f'pos_embed{enc_ind}', None)
+                    pos_embed = pos_embed + self.level_embed.weight[i]
+                    lvl_pos_embed_flatten.append(pos_embed)
+                feat_flatten = paddle.concat(feat_flatten, 1)
+                lvl_pos_embed_flatten = paddle.concat(lvl_pos_embed_flatten, 1)
+                memory = self.encoder(
+                    feat_flatten, pos_embed=lvl_pos_embed_flatten)
+                memory = memory.split([h * w for h, w in spatial_shapes], 1)
+                for i, (h, w) in enumerate(spatial_shapes):
+                    proj_feats[i] = memory[i].transpose([0, 2, 1]).reshape(
+                        [-1, self.hidden_dim, h, w])
+            else:
+                for i, enc_ind in enumerate(self.use_encoder_idx):
+                    h, w = proj_feats[enc_ind].shape[2:]
+                    # flatten [B, C, H, W] to [B, HxW, C]
+                    src_flatten = proj_feats[enc_ind].flatten(2).transpose(
+                        [0, 2, 1])
+                    if self.training or self.eval_size is None:
+                        pos_embed = self.build_2d_sincos_position_embedding(
+                            w, h, self.hidden_dim, self.pe_temperature)
+                    else:
+                        pos_embed = getattr(self, f'pos_embed{enc_ind}', None)
+                    memory = self.encoder(src_flatten, pos_embed=pos_embed)
+                    proj_feats[enc_ind] = memory.transpose([0, 2, 1]).reshape(
+                        [-1, self.hidden_dim, h, w])
+
+        if self.with_pan:
+            # top-down fpn
+            inner_outs = [proj_feats[-1]]
+            for idx in range(len(self.in_channels) - 1, 0, -1):
+                feat_heigh = inner_outs[0]
+                feat_low = proj_feats[idx - 1]
+                feat_heigh = self.lateral_convs[len(self.in_channels) - 1 -
+                                                idx](feat_heigh)
+                inner_outs[0] = feat_heigh
+
+                upsample_feat = F.interpolate(
+                    feat_heigh, scale_factor=2., mode="nearest")
+                inner_out = self.fpn_blocks[len(self.in_channels) - 1 - idx](
+                    paddle.concat(
+                        [upsample_feat, feat_low], axis=1))
+                inner_outs.insert(0, inner_out)
+
+            # bottom-up pan
+            outs = [inner_outs[0]]
+            for idx in range(len(self.in_channels) - 1):
+                feat_low = outs[-1]
+                feat_height = inner_outs[idx + 1]
+                downsample_feat = self.downsample_convs[idx](feat_low)
+                out = self.pan_blocks[idx](paddle.concat(
+                    [downsample_feat, feat_height], axis=1))
+                outs.append(out)
+
+            return outs
+        elif self.with_fpn:
+            out = [
+                self.lateral_convs[i](proj_feats[i])
+                for i in range(len(self.in_channels))
+            ]
+            for i in range(1, len(out)):
+                upsample = F.interpolate(
+                    out[-i], scale_factor=2., mode='nearest')
+                out[-(i + 1)] += upsample
+            out = [
+                self.fpn_convs[i](out[i])
+                for i in range(len(self.in_channels))
+            ]
+            return out
+        elif self.with_yolocsppan:
+            # top-down fpn
+            inner_outs = [proj_feats[-1]]
+            for idx in range(len(self.in_channels) - 1, 0, -1):
+                feat_heigh = inner_outs[0]
+                feat_low = proj_feats[idx - 1]
+                feat_heigh = self.lateral_convs[len(self.in_channels) - 1 -
+                                                idx](feat_heigh)
+                inner_outs[0] = feat_heigh
+
+                upsample_feat = F.interpolate(
+                    feat_heigh, scale_factor=2., mode="nearest")
+                inner_out = self.fpn_blocks[len(self.in_channels) - 1 - idx](
+                    paddle.concat(
+                        [upsample_feat, feat_low], axis=1))
+                inner_outs.insert(0, inner_out)
+
+            # bottom-up pan
+            outs = [inner_outs[0]]
+            for idx in range(len(self.in_channels) - 1):
+                feat_low = outs[-1]
+                feat_height = inner_outs[idx + 1]
+                downsample_feat = self.downsample_convs[idx](feat_low)
+                out = self.pan_blocks[idx](paddle.concat(
+                    [downsample_feat, feat_height], axis=1))
+                outs.append(out)
+
+            return outs
+        else:
+            return proj_feats
 
     @classmethod
     def from_config(cls, cfg, input_shape):

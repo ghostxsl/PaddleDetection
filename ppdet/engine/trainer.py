@@ -426,6 +426,12 @@ class Trainer(object):
             self.cfg['EvalDataset'] = self.cfg.EvalDataset = create(
                 "EvalDataset")()
 
+        params = sum([
+            p.numel() for n, p in self.model.named_parameters()
+            if all([x not in n for x in ['_mean', '_variance']])
+        ])  # exclude BatchNorm running status
+        print('params: ', params.item())
+
         model = self.model
         if self.cfg.get('to_static', False):
             model = apply_to_static(self.cfg, model)
@@ -615,6 +621,12 @@ class Trainer(object):
         tic = time.time()
         self._compose_callback.on_epoch_begin(self.status)
         self.status['mode'] = 'eval'
+
+        params = sum([
+            p.numel() for n, p in self.model.named_parameters()
+            if all([x not in n for x in ['_mean', '_variance']])
+        ])  # exclude BatchNorm running status
+        print('params: ', params.item())
 
         self.model.eval()
         if self.cfg.get('print_flops', False):
